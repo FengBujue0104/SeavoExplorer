@@ -45,6 +45,25 @@ def _decode_zip_name(raw):
     return raw
 
 
+# Windows 文件属性
+FILE_ATTRIBUTE_HIDDEN = 0x02
+
+# 项目版本文件夹默认子目录模板（集中定义，避免对话框与默认设置各写一份）
+DEFAULT_STRUCTURE_FOLDERS = ['BOM', 'SCH', '物料', '评审', '信号测试']
+
+# 各类文件预览的截断阈值（产品行为参数，集中可调）
+PREVIEW_PDF_PAGES = 3
+PREVIEW_EXCEL_MAX_ROWS = 10
+PREVIEW_DOCX_PARAGRAPHS = 20
+PREVIEW_DOC_LINES = 50
+
+# 按扩展名分类的可预览文件类型（preview_file 与 show_full_image 共用，避免两份手动同步）
+IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.svg')
+VIDEO_EXTS = ('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm', '.mpg', '.mpeg', '.3gp')
+ARCHIVE_EXTS = ('.zip', '.rar', '.7z')
+TEXT_EXTS = ('.txt', '.csv', '.log', '.bom', '.drc', '.rep', '.rpt', '.md', '.json', '.xml', '.html', '.htm', '.ini', '.cfg')
+
+
 def _first_available_font(candidates):
     """返回候选列表中系统已安装的第一个字体名，都没有则返回空串。"""
     try:
@@ -514,7 +533,7 @@ class NewStructureDialog(QDialog):
     def __init__(self, project_folder=None, parent=None):
         super().__init__(parent)
         self.version = '00'
-        self.selected_folders = {'BOM': True, 'SCH': True, '物料': True, '评审': True, '信号测试': True}
+        self.selected_folders = {name: True for name in DEFAULT_STRUCTURE_FOLDERS}
         self.custom_folders = []
         self.project_folder = project_folder
         self.parent_window = parent
@@ -568,7 +587,7 @@ class NewStructureDialog(QDialog):
         folders_group = QGroupBox('常用文件夹（默认勾选）')
         folders_layout = QVBoxLayout()
         
-        self.folder_names = ['BOM', 'SCH', '物料', '评审', '信号测试']
+        self.folder_names = list(DEFAULT_STRUCTURE_FOLDERS)
         self.folder_checkboxes = {}
         checkbox_layout = QGridLayout()
         for i, name in enumerate(self.folder_names):
@@ -1403,7 +1422,7 @@ class MainWindow(QMainWindow):
         self.default_new_project_folder = os.path.expanduser("~")
         self.folder_structure = {
             'version': '00',
-            'selected_folders': {'BOM': True, 'SCH': True, '物料': True, '评审': True, '信号测试': True},
+            'selected_folders': {name: True for name in DEFAULT_STRUCTURE_FOLDERS},
             'custom_folders': []
         }
         self.quick_access_paths = self._get_default_quick_access_paths()
@@ -1488,7 +1507,7 @@ class MainWindow(QMainWindow):
         """将文件设置为隐藏属性"""
         try:
             if sys.platform == 'win32':
-                ctypes.windll.kernel32.SetFileAttributesW(file_path, 0x02)
+                ctypes.windll.kernel32.SetFileAttributesW(file_path, FILE_ATTRIBUTE_HIDDEN)
         except Exception:
             pass
 
@@ -1806,6 +1825,18 @@ class MainWindow(QMainWindow):
 
         if not valid_paths:
             QMessageBox.warning(self, '警告', '没有可移入回收站的文件或文件夹')
+            return False
+
+        # 二次确认：删除是静默的（FOF_NOCONFIRMATION|FOF_SILENT），自行弹确认避免误删
+        if len(valid_paths) == 1:
+            prompt = f'确定将以下项目移入回收站？\n\n{os.path.basename(valid_paths[0])}'
+        else:
+            names = '\n'.join('· ' + os.path.basename(p) for p in valid_paths[:10])
+            if len(valid_paths) > 10:
+                names += f'\n… 等共 {len(valid_paths)} 个项目'
+            prompt = f'确定将以下 {len(valid_paths)} 个项目移入回收站？\n\n{names}'
+        if QMessageBox.question(self, '确认删除', prompt,
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return False
 
         try:
@@ -2373,15 +2404,18 @@ class MainWindow(QMainWindow):
         if not sevenzip:
             raise Exception('未找到7-Zip，请在设置中指定7z.exe路径或安装7-Zip')
         
-        cmd = [sevenzip, 'x', archive_path, f'-o{extract_dir}', '-y']
+        cmd = [sevenzip, 'x', archive_path, f'-o{extract_dir}', '-y', '-p']
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='gbk', errors='ignore', startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
-        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='gbk', errors='ignore', startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise Exception('7-Zip 解压超时（可能压缩包损坏、需要密码或路径不可达）')
+
         if result.returncode != 0:
             raise Exception(f'7-Zip解压失败: {result.stderr or result.stdout}')
-        
+
         return True
     
     def _list_archive_with_7z(self, archive_path):
@@ -2393,21 +2427,30 @@ class MainWindow(QMainWindow):
         if not sevenzip:
             raise Exception('未找到7-Zip')
         
-        cmd = [sevenzip, 'l', '-slt', archive_path]
+        cmd = [sevenzip, 'l', '-slt', '-p', archive_path]
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='gbk', errors='ignore', startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
-        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='gbk', errors='ignore', startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise Exception('读取压缩包超时（可能压缩包损坏、需要密码或路径不可达）')
+
         if result.returncode != 0:
             raise Exception(f'读取压缩包失败: {result.stderr or result.stdout}')
-        
+
         items = []
         lines = result.stdout.split('\n')
         current_item = {}
-        
+        # 7z -slt 输出先是描述压缩包自身的头部块，'----------' 分隔线之后才是包内条目
+        in_entries = False
+
         for line in lines:
             line = line.strip()
+            if line == '----------':
+                in_entries = True
+                current_item = {}
+                continue
             if line.startswith('Path = '):
                 current_item['path'] = line[7:]
             elif line.startswith('Size = '):
@@ -2416,11 +2459,11 @@ class MainWindow(QMainWindow):
                 attrs = line[13:]
                 current_item['is_dir'] = 'D' in attrs
             elif line == '' and 'path' in current_item:
-                # 排除压缩包本身
-                if current_item['path'] != os.path.basename(archive_path):
+                # 仅收集分隔线之后的真实条目，头部块（压缩包自身）天然被排除
+                if in_entries:
                     items.append((current_item['path'], current_item.get('size', 0), current_item.get('is_dir', False)))
                 current_item = {}
-        
+
         return items
     
     def smart_extract(self, archive_path):
@@ -2588,14 +2631,23 @@ class MainWindow(QMainWindow):
                 version_folder = os.path.join(self.current_folder, f'V{version}')
                 if not os.path.exists(version_folder):
                     os.makedirs(version_folder)
-                created_count = 0
+                created = []
+                failed = []
                 for folder in all_folders:
                     folder_path = os.path.join(version_folder, folder)
-                    if not os.path.exists(folder_path):
+                    if os.path.exists(folder_path):
+                        continue
+                    try:
                         os.makedirs(folder_path)
-                        created_count += 1
-                if created_count > 0:
-                    QMessageBox.information(self, '成功', f'已创建版本文件夹 V{version} 和 {created_count} 个子文件夹')
+                        created.append(folder)
+                    except Exception as fe:
+                        failed.append(f'{folder}（{fe}）')
+                if failed:
+                    msg = f'已创建 {len(created)} 个子文件夹，以下创建失败：\n' + '\n'.join('· ' + f for f in failed)
+                    msg += '\n\n请检查目标是否为只读、网络盘是否断开或权限不足。'
+                    QMessageBox.warning(self, '部分完成', msg)
+                elif created:
+                    QMessageBox.information(self, '成功', f'已创建版本文件夹 V{version} 和 {len(created)} 个子文件夹')
                 else:
                     QMessageBox.information(self, '提示', f'版本文件夹 V{version} 已存在，所有子文件夹也已存在')
                 self.file_tree.setRootIndex(self.file_model.index(self.current_folder))
@@ -2626,7 +2678,7 @@ class MainWindow(QMainWindow):
         try:
             reader = PdfReader(file_path)
             content += f'页数: {len(reader.pages)}\n\n'
-            for i, page in enumerate(reader.pages[:3]):
+            for i, page in enumerate(reader.pages[:PREVIEW_PDF_PAGES]):
                 content += f'第 {i+1} 页:\n{page.extract_text()}\n\n'
         except Exception as e:
             content += f'PDF读取错误: {str(e)}'
@@ -2686,31 +2738,6 @@ class MainWindow(QMainWindow):
             self.preview_tab.setPlainText(f'视频预览错误: {str(e)}')
 
     def _build_file_tree(self, files):
-        tree = {}
-        for item in files:
-            if hasattr(item, 'filename'):
-                path = item.filename
-                is_dir = path.endswith('/') or path.endswith('\\')
-                size = item.file_size
-            else:
-                path = item.get('name', '')
-                is_dir = item.get('folder', False)
-                size = item.get('size', 0)
-            path_parts = path.replace('\\', '/').rstrip('/').split('/')
-            current = tree
-            for i, part in enumerate(path_parts):
-                if part not in current:
-                    current[part] = {'_type': 'dir', '_children': {}, '_item': None}
-                if i == len(path_parts) - 1:
-                    if is_dir:
-                        current[part]['_item'] = item
-                    else:
-                        current[part] = {'_type': 'file', '_size': size, '_item': item}
-                else:
-                    current = current[part]['_children']
-        return tree
-
-    def _build_file_tree_v2(self, files):
         """构建文件树（使用元组列表格式）"""
         tree = {}
         for filename, size, is_dir in files:
@@ -2761,7 +2788,7 @@ class MainWindow(QMainWindow):
                     files_list.append((filename, size, is_dir))
                     total_size += size
             
-            file_tree = self._build_file_tree_v2(files_list)
+            file_tree = self._build_file_tree(files_list)
             archive_info += f'文件总数: {len(files_list)}\n'
             archive_info += f'总大小: {total_size / 1024:.2f} KB\n\n'
             archive_info += '文件树结构:\n'
@@ -2772,37 +2799,24 @@ class MainWindow(QMainWindow):
             self.preview_tab.setPlainText(f'压缩包预览错误: {str(e)}')
 
     def _preview_excel(self, file_path, ext):
-        if ext == '.xlsx':
+        if ext in ('.xlsx', '.xlsm'):
+            is_macro = (ext == '.xlsm')
             if not load_workbook:
-                self.preview_tab.setPlainText('Excel文件预览功能需要安装openpyxl库')
+                self.preview_tab.setPlainText(
+                    ('Excel宏文件预览功能需要安装openpyxl库' if is_macro else 'Excel文件预览功能需要安装openpyxl库'))
                 return
-            content = f'Excel文件: {os.path.basename(file_path)}\n\n'
+            content = (f'Excel宏文件: {os.path.basename(file_path)}\n\n' if is_macro
+                       else f'Excel文件: {os.path.basename(file_path)}\n\n')
             try:
-                workbook = load_workbook(file_path, read_only=True)
+                workbook = load_workbook(file_path, read_only=True, keep_vba=is_macro)
                 for sheet_name in workbook.sheetnames:
                     content += f'工作表: {sheet_name}\n'
                     worksheet = workbook[sheet_name]
-                    for row in worksheet.iter_rows(min_row=1, max_row=10, values_only=True):
+                    for row in worksheet.iter_rows(min_row=1, max_row=PREVIEW_EXCEL_MAX_ROWS, values_only=True):
                         content += '\t'.join(str(cell) if cell is not None else '' for cell in row) + '\n'
                     content += '\n'
             except Exception as e:
-                content += f'Excel读取错误: {str(e)}'
-            self.preview_tab.setPlainText(content)
-        elif ext == '.xlsm':
-            if not load_workbook:
-                self.preview_tab.setPlainText('Excel宏文件预览功能需要安装openpyxl库')
-                return
-            content = f'Excel宏文件: {os.path.basename(file_path)}\n\n'
-            try:
-                workbook = load_workbook(file_path, read_only=True, keep_vba=True)
-                for sheet_name in workbook.sheetnames:
-                    content += f'工作表: {sheet_name}\n'
-                    worksheet = workbook[sheet_name]
-                    for row in worksheet.iter_rows(min_row=1, max_row=10, values_only=True):
-                        content += '\t'.join(str(cell) if cell is not None else '' for cell in row) + '\n'
-                    content += '\n'
-            except Exception as e:
-                content += f'Excel宏文件读取错误: {str(e)}'
+                content += (f'Excel宏文件读取错误: {str(e)}' if is_macro else f'Excel读取错误: {str(e)}')
             self.preview_tab.setPlainText(content)
         elif ext == '.xls':
             if not xlrd:
@@ -2814,7 +2828,7 @@ class MainWindow(QMainWindow):
                 for sheet_idx in range(workbook.nsheets):
                     sheet = workbook.sheet_by_index(sheet_idx)
                     content += f'工作表: {sheet.name}\n'
-                    max_rows = min(sheet.nrows, 10)
+                    max_rows = min(sheet.nrows, PREVIEW_EXCEL_MAX_ROWS)
                     for row_idx in range(max_rows):
                         row_data = [str(sheet.cell(row_idx, col_idx).value) for col_idx in range(sheet.ncols)]
                         content += '\t'.join(row_data) + '\n'
@@ -2831,7 +2845,7 @@ class MainWindow(QMainWindow):
             content = f'Word文件: {os.path.basename(file_path)}\n\n'
             try:
                 doc = Document(file_path)
-                for para in doc.paragraphs[:20]:
+                for para in doc.paragraphs[:PREVIEW_DOCX_PARAGRAPHS]:
                     content += para.text + '\n'
             except Exception as e:
                 content += f'Word读取错误: {str(e)}'
@@ -2850,7 +2864,7 @@ class MainWindow(QMainWindow):
                     text_parts = [chr(b) for b in data if 32 <= b < 127 or b in (10, 13, 9)]
                     text = ''.join(text_parts)
                     lines = [l.strip() for l in text.split('\n') if l.strip()]
-                    content += '\n'.join(lines[:50])
+                    content += '\n'.join(lines[:PREVIEW_DOC_LINES])
             except Exception as e:
                 content += f'Word 97-2003读取错误: {str(e)}'
             finally:
@@ -2871,10 +2885,10 @@ class MainWindow(QMainWindow):
     def preview_file(self, file_path):
         try:
             ext = os.path.splitext(file_path)[1].lower()
-            text_exts = ['.txt', '.csv', '.log', '.bom', '.drc', '.rep', '.rpt', '.md', '.json', '.xml', '.html', '.htm', '.ini', '.cfg']
-            image_exts = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.svg']
-            video_exts = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm', '.mpg', '.mpeg', '.3gp']
-            archive_exts = ['.zip', '.rar', '.7z']
+            text_exts = TEXT_EXTS
+            image_exts = IMAGE_EXTS
+            video_exts = VIDEO_EXTS
+            archive_exts = ARCHIVE_EXTS
 
             self.preview_tab.show()
             self.image_scroll_area.hide()
@@ -3104,8 +3118,8 @@ class MainWindow(QMainWindow):
         
         try:
             ext = os.path.splitext(self.current_image_path)[1].lower()
-            image_exts = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.svg']
-            video_exts = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm', '.mpg', '.mpeg', '.3gp']
+            image_exts = IMAGE_EXTS
+            video_exts = VIDEO_EXTS
             
             # 创建对话框
             dialog = QDialog(self)
