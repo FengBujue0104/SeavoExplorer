@@ -30,6 +30,20 @@ from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, Q
 
 _SPLASH_PIXMAP = None
 
+# 项目文件夹命名正则：S/M 前缀 + 3~4 位编号 + 可选 _注释 后缀。
+# 集中定义，扫描器与各定位/状态栏 helper 统一复用，避免命名规则调整时漏改。
+PROJECT_FOLDER_RE = re.compile(r'^([SM])(\d{3,4})(?:_(.*))?$')
+
+
+def _decode_zip_name(raw):
+    """解码 zip 条目名：旧式 zip 用 cp437 存中文名，依次尝试 gbk、utf-8 还原，都失败则用原值。"""
+    for enc in ('gbk', 'utf-8'):
+        try:
+            return raw.encode('cp437').decode(enc)
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+    return raw
+
 
 def _first_available_font(candidates):
     """返回候选列表中系统已安装的第一个字体名，都没有则返回空串。"""
@@ -291,7 +305,6 @@ class FolderScanThread(QThread):
         self.include_subfolders = include_subfolders
         self.comments = comments
         self.sort_by_number = sort_by_number
-        self.pattern = r'^([SM])(\d{3,4})(?:_(.*))?$'
 
     def _scan_directory(self, directory, dir_name, motherboard_folders, daughterboard_folders):
         """扫描单个目录，收集匹配的项目文件夹"""
@@ -302,7 +315,7 @@ class FolderScanThread(QThread):
             for item in items:
                 item_path = os.path.join(directory, item)
                 if os.path.isdir(item_path):
-                    match = re.match(self.pattern, item)
+                    match = PROJECT_FOLDER_RE.match(item)
                     if match:
                         prefix = match.group(1)
                         number = match.group(2)
@@ -737,7 +750,46 @@ class NewStructureDialog(QDialog):
             'custom_folders': custom_folders
         }
 
-class SettingsDialog(QDialog):
+class _ReorderableTableDialog(QDialog):
+    """带可重排 QTableWidget（self.path_list）的对话框基类，封装上移/下移/删除行。
+    子类负责建表与 add_path/save_settings。_swap_rows 通用处理任意列数，保留 text/flags/勾选态。"""
+
+    @staticmethod
+    def _clone_cell(item):
+        new = QTableWidgetItem(item.text() if item is not None else '')
+        if item is not None:
+            new.setFlags(item.flags())
+            if item.flags() & Qt.ItemIsUserCheckable:
+                new.setCheckState(item.checkState())
+        return new
+
+    def _swap_rows(self, row1, row2):
+        for col in range(self.path_list.columnCount()):
+            # 先克隆两个单元格再写回：setItem 会销毁原 C++ 对象，必须在覆盖前完成克隆
+            new_for_row1 = self._clone_cell(self.path_list.item(row2, col))
+            new_for_row2 = self._clone_cell(self.path_list.item(row1, col))
+            self.path_list.setItem(row1, col, new_for_row1)
+            self.path_list.setItem(row2, col, new_for_row2)
+
+    def remove_path(self):
+        current_row = self.path_list.currentRow()
+        if current_row >= 0:
+            self.path_list.removeRow(current_row)
+
+    def move_up(self):
+        current_row = self.path_list.currentRow()
+        if current_row > 0:
+            self._swap_rows(current_row, current_row - 1)
+            self.path_list.setCurrentCell(current_row - 1, 0)
+
+    def move_down(self):
+        current_row = self.path_list.currentRow()
+        if current_row >= 0 and current_row < self.path_list.rowCount() - 1:
+            self._swap_rows(current_row, current_row + 1)
+            self.path_list.setCurrentCell(current_row + 1, 0)
+
+
+class SettingsDialog(_ReorderableTableDialog):
     def __init__(self, current_paths, include_subfolders=False, sort_by_number=False, parent=None):
         super().__init__(parent)
         self.current_paths = current_paths if current_paths is not None else []
@@ -808,34 +860,6 @@ class SettingsDialog(QDialog):
                 self.path_list.insertRow(row)
                 self.path_list.setItem(row, 0, QTableWidgetItem(name))
                 self.path_list.setItem(row, 1, QTableWidgetItem(folder_path))
-        
-    def remove_path(self):
-        current_row = self.path_list.currentRow()
-        if current_row >= 0:
-            self.path_list.removeRow(current_row)
-    
-    def move_up(self):
-        current_row = self.path_list.currentRow()
-        if current_row > 0:
-            self._swap_rows(current_row, current_row - 1)
-            self.path_list.setCurrentCell(current_row - 1, 0)
-    
-    def move_down(self):
-        current_row = self.path_list.currentRow()
-        if current_row >= 0 and current_row < self.path_list.rowCount() - 1:
-            self._swap_rows(current_row, current_row + 1)
-            self.path_list.setCurrentCell(current_row + 1, 0)
-    
-    def _swap_rows(self, row1, row2):
-        # 本对话框的表只有 2 列（名称、路径），不要访问第 3 列
-        name1 = self.path_list.item(row1, 0).text()
-        path1 = self.path_list.item(row1, 1).text()
-        name2 = self.path_list.item(row2, 0).text()
-        path2 = self.path_list.item(row2, 1).text()
-        self.path_list.setItem(row1, 0, QTableWidgetItem(name2))
-        self.path_list.setItem(row1, 1, QTableWidgetItem(path2))
-        self.path_list.setItem(row2, 0, QTableWidgetItem(name1))
-        self.path_list.setItem(row2, 1, QTableWidgetItem(path1))
 
     def save_settings(self):
         paths = []
@@ -902,7 +926,7 @@ class SevenZipSettingsDialog(QDialog):
         return self.archive_tool_path
 
 
-class QuickAccessSettingsDialog(QDialog):
+class QuickAccessSettingsDialog(_ReorderableTableDialog):
     def __init__(self, current_paths, parent=None):
         super().__init__(parent)
         self.current_paths = current_paths if current_paths else []
@@ -984,44 +1008,6 @@ class QuickAccessSettingsDialog(QDialog):
                 check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 check_item.setCheckState(Qt.Unchecked)
                 self.path_list.setItem(row, 2, check_item)
-    
-    def remove_path(self):
-        current_row = self.path_list.currentRow()
-        if current_row >= 0:
-            self.path_list.removeRow(current_row)
-    
-    def move_up(self):
-        current_row = self.path_list.currentRow()
-        if current_row > 0:
-            self._swap_rows(current_row, current_row - 1)
-            self.path_list.setCurrentCell(current_row - 1, 0)
-    
-    def move_down(self):
-        current_row = self.path_list.currentRow()
-        if current_row >= 0 and current_row < self.path_list.rowCount() - 1:
-            self._swap_rows(current_row, current_row + 1)
-            self.path_list.setCurrentCell(current_row + 1, 0)
-    
-    def _swap_rows(self, row1, row2):
-        # 本对话框的表有 3 列，第 3 列是“不显示预览”勾选框，交换时必须一并搬运
-        name1 = self.path_list.item(row1, 0).text()
-        path1 = self.path_list.item(row1, 1).text()
-        check1 = self.path_list.item(row1, 2).checkState()
-        name2 = self.path_list.item(row2, 0).text()
-        path2 = self.path_list.item(row2, 1).text()
-        check2 = self.path_list.item(row2, 2).checkState()
-        self.path_list.setItem(row1, 0, QTableWidgetItem(name2))
-        self.path_list.setItem(row1, 1, QTableWidgetItem(path2))
-        check_item1 = QTableWidgetItem()
-        check_item1.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-        check_item1.setCheckState(check2)
-        self.path_list.setItem(row1, 2, check_item1)
-        self.path_list.setItem(row2, 0, QTableWidgetItem(name1))
-        self.path_list.setItem(row2, 1, QTableWidgetItem(path1))
-        check_item2 = QTableWidgetItem()
-        check_item2.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-        check_item2.setCheckState(check1)
-        self.path_list.setItem(row2, 2, check_item2)
 
     def reset_to_default(self):
         if hasattr(self.parent(), '_get_default_quick_access_paths'):
@@ -1206,7 +1192,10 @@ class MainWindow(QMainWindow):
         
         # 确保app_dir目录存在
         os.makedirs(self.app_dir, exist_ok=True)
-        
+
+        # 加载配置/注释期间累积的警告，待 UI 就绪后统一弹出（此时主窗口尚未构建，不能直接弹框）
+        self._pending_load_warnings = []
+
         self.current_folder = None
         self.filtered_folders = {'主板': [], '子卡': []}
         self.include_subfolders = False
@@ -1222,9 +1211,17 @@ class MainWindow(QMainWindow):
         self.initUI()
         # 异步加载文件夹，提高启动速度
         self.load_filtered_folders_async()
+        # UI 就绪后弹出加载期累积的警告（配置/注释损坏等）
+        if self._pending_load_warnings:
+            QTimer.singleShot(0, self._show_pending_load_warnings)
         # 首次运行自动弹出新手向导（窗口显示后再弹，避免阻塞启动）
         if not getattr(self, 'wizard_shown', False):
             QTimer.singleShot(0, self.show_wizard)
+
+    def _show_pending_load_warnings(self):
+        if self._pending_load_warnings:
+            QMessageBox.warning(self, '提示', '\n'.join(self._pending_load_warnings))
+            self._pending_load_warnings = []
 
     def initUI(self):
         self.setWindowTitle('主板项目文件浏览器')
@@ -1450,28 +1447,39 @@ class MainWindow(QMainWindow):
 
     def load_settings(self):
         self._init_default_settings()
+        if not os.path.exists(self.CONFIG_FILE):
+            return self.project_paths
         try:
-            if os.path.exists(self.CONFIG_FILE):
-                with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-                if 'project_paths' in config_data and config_data['project_paths']:
-                    self.project_paths = config_data['project_paths']
-                if 'include_subfolders' in config_data:
-                    self.include_subfolders = config_data['include_subfolders']
-                if 'sort_by_number' in config_data:
-                    self.sort_by_number = config_data['sort_by_number']
-                if 'default_new_project_folder' in config_data:
-                    self.default_new_project_folder = config_data['default_new_project_folder']
-                if 'folder_structure' in config_data:
-                    self.folder_structure = config_data['folder_structure']
-                if 'archive_tool_path' in config_data:
-                    self.archive_tool_path = config_data['archive_tool_path']
-                if 'quick_access_paths' in config_data:
-                    self.quick_access_paths = config_data['quick_access_paths']
-                if 'pinned_folders' in config_data:
-                    self.pinned_folders = config_data['pinned_folders']
-                if 'wizard_shown' in config_data:
-                    self.wizard_shown = config_data['wizard_shown']
+            with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            # 配置损坏：备份后用默认值，并提示用户，避免静默丢失全部配置
+            bak = self._backup_corrupt_file(self.CONFIG_FILE)
+            self._pending_load_warnings.append(
+                '配置文件已损坏，已恢复默认设置' + (f'（原文件备份为 {os.path.basename(bak)}）' if bak else ''))
+            self._init_default_settings()
+            return self.project_paths
+        except Exception:
+            return self.project_paths
+        try:
+            if 'project_paths' in config_data and config_data['project_paths']:
+                self.project_paths = config_data['project_paths']
+            if 'include_subfolders' in config_data:
+                self.include_subfolders = config_data['include_subfolders']
+            if 'sort_by_number' in config_data:
+                self.sort_by_number = config_data['sort_by_number']
+            if 'default_new_project_folder' in config_data:
+                self.default_new_project_folder = config_data['default_new_project_folder']
+            if 'folder_structure' in config_data:
+                self.folder_structure = config_data['folder_structure']
+            if 'archive_tool_path' in config_data:
+                self.archive_tool_path = config_data['archive_tool_path']
+            if 'quick_access_paths' in config_data:
+                self.quick_access_paths = config_data['quick_access_paths']
+            if 'pinned_folders' in config_data:
+                self.pinned_folders = config_data['pinned_folders']
+            if 'wizard_shown' in config_data:
+                self.wizard_shown = config_data['wizard_shown']
         except Exception:
             self._init_default_settings()
         return self.project_paths
@@ -1485,22 +1493,34 @@ class MainWindow(QMainWindow):
             pass
 
     def safe_write_json(self, file_path, data, make_hidden=True):
-        """安全地写入JSON文件（先删除再写入）"""
+        """原子地写入JSON文件：先写临时文件再 os.replace 替换，避免写入中途崩溃丢失原文件"""
+        tmp_path = file_path + '.tmp'
         try:
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            # 目标已存在时先解除隐藏/只读，否则 os.replace 在 Windows 上可能失败
             if os.path.exists(file_path):
                 try:
-                    os.chmod(file_path, 0o777)
-                    os.remove(file_path)
+                    os.chmod(file_path, 0o666)
+                    if sys.platform == 'win32':
+                        ctypes.windll.kernel32.SetFileAttributesW(file_path, 0x80)  # FILE_ATTRIBUTE_NORMAL
                 except Exception:
                     pass
-            with open(file_path, 'w', encoding='utf-8') as f:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, file_path)  # 原子替换
             os.chmod(file_path, 0o644)
             if make_hidden:
                 self.make_file_hidden(file_path)
             return True
         except Exception:
+            # 清理残留临时文件，避免污染目录
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
             return False
 
     def save_settings_to_file(self, paths, include_subfolders=False, default_new_project_folder=None):
@@ -1531,12 +1551,37 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, '错误', f'保存设置失败: {str(e)}')
             return False
 
+    def _backup_corrupt_file(self, file_path):
+        """将损坏的配置/注释文件改名备份为 .bak，避免被下次保存静默覆盖。返回备份路径或 None"""
+        try:
+            if not os.path.exists(file_path):
+                return None
+            bak = file_path + '.bak'
+            try:
+                if sys.platform == 'win32':
+                    ctypes.windll.kernel32.SetFileAttributesW(file_path, 0x80)
+            except Exception:
+                pass
+            if os.path.exists(bak):
+                os.remove(bak)
+            os.replace(file_path, bak)
+            return bak
+        except Exception:
+            return None
+
     def load_comments(self):
         """加载项目注释"""
+        if not os.path.exists(self.COMMENTS_FILE):
+            return {}
         try:
-            if os.path.exists(self.COMMENTS_FILE):
-                with open(self.COMMENTS_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+            with open(self.COMMENTS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            # 文件损坏：备份而非静默返回 {}（否则下次保存会用空字典永久覆盖所有注释）
+            bak = self._backup_corrupt_file(self.COMMENTS_FILE)
+            self._pending_load_warnings.append(
+                '注释文件已损坏，已忽略' + (f'并备份为 {os.path.basename(bak)}' if bak else ''))
+            return {}
         except Exception:
             return {}
 
@@ -1843,20 +1888,42 @@ class MainWindow(QMainWindow):
     
     def load_filtered_folders_async(self):
         """异步加载过滤后的文件夹"""
+        # 若已有扫描线程在运行，先停止旧线程并断开其信号，避免旧结果回填到新一轮扫描，
+        # 以及 QThread 仍在运行时被覆盖销毁触发警告
+        old = getattr(self, 'scan_thread', None)
+        if old is not None and old.isRunning():
+            try:
+                old.scan_completed.disconnect(self.on_scan_completed)
+                old.scan_progress.disconnect(self.on_scan_progress)
+            except (TypeError, RuntimeError):
+                pass
+            old.requestInterruption()
+            old.quit()
+            old.wait(3000)
+
         # 清空表格
         self.motherboard_table.setRowCount(0)
         self.daughterboard_table.setRowCount(0)
         self.filtered_folders = {'主板': [], '子卡': []}
-        
+
         # 在状态栏显示加载信息
         self.statusBar().showMessage("正在扫描文件夹...")
-        
+
         # 创建并启动扫描线程
         self.scan_thread = FolderScanThread(self.settings, self.include_subfolders, self.comments, self.sort_by_number)
         self.scan_thread.scan_completed.connect(self.on_scan_completed)
         self.scan_thread.scan_progress.connect(self.on_scan_progress)
         self.scan_thread.start()
-    
+
+    def closeEvent(self, event):
+        """退出时确保扫描线程已结束，避免 QThread 被销毁时仍在运行"""
+        thread = getattr(self, 'scan_thread', None)
+        if thread is not None and thread.isRunning():
+            thread.requestInterruption()
+            thread.quit()
+            thread.wait(3000)
+        super().closeEvent(event)
+
     def on_scan_progress(self, message):
         """处理扫描进度更新"""
         self.statusBar().showMessage(message)
@@ -1998,7 +2065,7 @@ class MainWindow(QMainWindow):
         
         # 根据列执行不同操作
         if column == 0:  # 双击编号列：打开文件夹
-            os.startfile(folder_path)
+            self._open_with_shell(folder_path)
         elif column == 1:  # 双击注释列：修改注释
             # 从内部存储获取当前注释
             current_comment = self.comments.get(folder_path, '')
@@ -2147,6 +2214,13 @@ class MainWindow(QMainWindow):
 
     def _paste_single(self, source_path, target_dir):
         """复制单个文件/文件夹到目标目录，处理重名"""
+        # 防止把文件夹复制进它自身或其子目录，否则 copytree 会无限递归嵌套直到路径超长
+        if os.path.isdir(source_path):
+            src_norm = os.path.normcase(os.path.normpath(os.path.abspath(source_path)))
+            tgt_norm = os.path.normcase(os.path.normpath(os.path.abspath(target_dir)))
+            if tgt_norm == src_norm or tgt_norm.startswith(src_norm + os.sep):
+                raise Exception(f'不能将文件夹复制到其自身或子目录中：{os.path.basename(source_path)}')
+
         base_name = os.path.basename(source_path)
         dest = os.path.join(target_dir, base_name)
 
@@ -2362,13 +2436,7 @@ class MainWindow(QMainWindow):
                 import zipfile
                 with zipfile.ZipFile(archive_path, 'r') as zf:
                     for info in zf.infolist():
-                        try:
-                            filename = info.filename.encode('cp437').decode('gbk')
-                        except (UnicodeDecodeError, UnicodeEncodeError):
-                            try:
-                                filename = info.filename.encode('cp437').decode('utf-8')
-                            except (UnicodeDecodeError, UnicodeEncodeError):
-                                filename = info.filename
+                        filename = _decode_zip_name(info.filename)
                         items.append((filename, info.file_size, info.is_dir()))
             elif ext in ['.rar', '.7z']:
                 # 使用7-Zip处理RAR和7z
@@ -2399,14 +2467,8 @@ class MainWindow(QMainWindow):
                 import zipfile
                 with zipfile.ZipFile(archive_path, 'r') as zf:
                     for info in zf.infolist():
-                        try:
-                            filename = info.filename.encode('cp437').decode('gbk')
-                        except (UnicodeDecodeError, UnicodeEncodeError):
-                            try:
-                                filename = info.filename.encode('cp437').decode('utf-8')
-                            except (UnicodeDecodeError, UnicodeEncodeError):
-                                filename = info.filename
-                        
+                        filename = _decode_zip_name(info.filename)
+
                         target_path = os.path.join(extract_dir, filename)
 
                         # 防 Zip-slip：归档内文件名可能含 ../，校验解压目标必须在 extract_dir 内
@@ -2433,7 +2495,7 @@ class MainWindow(QMainWindow):
         """更新状态栏显示当前项目文件夹信息"""
         if self.current_folder:
             folder_name = os.path.basename(self.current_folder)
-            match = re.match(r'^([SM])(\d{3,4})(?:_(.*))?$', folder_name)
+            match = PROJECT_FOLDER_RE.match(folder_name)
             if match:
                 prefix = match.group(1)
                 number = match.group(2)
@@ -2488,7 +2550,7 @@ class MainWindow(QMainWindow):
     
     def locate_new_folder(self, folder_path):
         folder_name = os.path.basename(folder_path)
-        match = re.match(r'^([SM])(\d{3,4})(?:_(.*))?$', folder_name)
+        match = PROJECT_FOLDER_RE.match(folder_name)
         if match:
             prefix = match.group(1)
             if prefix == 'S':
@@ -2510,7 +2572,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '警告', '请先选择一个项目文件夹')
             return
         folder_name = os.path.basename(self.current_folder)
-        match = re.match(r'^([SM])(\d{3,4})(?:_(.*))?$', folder_name)
+        match = PROJECT_FOLDER_RE.match(folder_name)
         if not match:
             QMessageBox.warning(self, '警告', '当前选择的不是有效的项目文件夹')
             return
@@ -2690,13 +2752,7 @@ class MainWindow(QMainWindow):
                 import zipfile
                 with zipfile.ZipFile(file_path, 'r') as zf:
                     for item in zf.infolist():
-                        try:
-                            filename = item.filename.encode('cp437').decode('gbk')
-                        except (UnicodeDecodeError, UnicodeEncodeError):
-                            try:
-                                filename = item.filename.encode('cp437').decode('utf-8')
-                            except (UnicodeDecodeError, UnicodeEncodeError):
-                                filename = item.filename
+                        filename = _decode_zip_name(item.filename)
                         files_list.append((filename, item.file_size, item.is_dir()))
                         total_size += item.file_size
             elif ext in ['.rar', '.7z']:
@@ -2785,6 +2841,7 @@ class MainWindow(QMainWindow):
                 self.preview_tab.setPlainText('Word 97-2003文件预览功能需要安装olefile库')
                 return
             content = f'Word文件(97-2003): {os.path.basename(file_path)}\n\n'
+            ole = None
             try:
                 ole = olefile.OleFileIO(file_path)
                 if ole.exists('WordDocument'):
@@ -2794,9 +2851,15 @@ class MainWindow(QMainWindow):
                     text = ''.join(text_parts)
                     lines = [l.strip() for l in text.split('\n') if l.strip()]
                     content += '\n'.join(lines[:50])
-                ole.close()
             except Exception as e:
                 content += f'Word 97-2003读取错误: {str(e)}'
+            finally:
+                # 即使读取异常也要关闭句柄，否则文件被占用无法删除/重命名
+                if ole is not None:
+                    try:
+                        ole.close()
+                    except Exception:
+                        pass
             self.preview_tab.setPlainText(content)
 
     def _preview_binary(self, file_path, ext):

@@ -99,6 +99,65 @@ except Exception as e:
     import traceback; traceback.print_exc()
     check('#4/#7 zip 解压验证', False, repr(e))
 
+# ---- #13 粘贴: 文件夹复制进自身/子目录被阻止 ----
+try:
+    base = tempfile.mkdtemp()
+    src = os.path.join(base, 'proj'); os.makedirs(os.path.join(src, 'sub'))
+    win = main.MainWindow.__new__(main.MainWindow)
+    # 复制进自身
+    blocked_self = False
+    try:
+        win._paste_single(src, src)
+    except Exception:
+        blocked_self = True
+    # 复制进子目录
+    blocked_child = False
+    try:
+        win._paste_single(src, os.path.join(src, 'sub'))
+    except Exception:
+        blocked_child = True
+    # 正常复制到无关目录应成功
+    other = os.path.join(base, 'dest'); os.makedirs(other)
+    win._paste_single(src, other)
+    ok_normal = os.path.exists(os.path.join(other, 'proj'))
+    check('#13 文件夹复制进自身/子目录被阻止且正常复制可用',
+          blocked_self and blocked_child and ok_normal,
+          f'self={blocked_self} child={blocked_child} normal={ok_normal}')
+except Exception as e:
+    check('#13 粘贴自包含守卫', False, repr(e))
+
+# ---- #9 safe_write_json 原子写: 临时文件 + os.replace，损坏后原文件保留 ----
+try:
+    import json as _json
+    win = main.MainWindow.__new__(main.MainWindow)
+    win.make_file_hidden = lambda p: None  # 跳过隐藏属性
+    d = tempfile.mkdtemp()
+    fp = os.path.join(d, 'cfg.json')
+    ok = win.safe_write_json(fp, {'a': 1, '中文': True}, make_hidden=False)
+    written = _json.load(open(fp, encoding='utf-8'))
+    no_tmp = not os.path.exists(fp + '.tmp')
+    check('#9 safe_write_json 原子写正确且无残留 .tmp',
+          ok and written == {'a': 1, '中文': True} and no_tmp,
+          f'ok={ok} no_tmp={no_tmp}')
+except Exception as e:
+    check('#9 safe_write_json', False, repr(e))
+
+# ---- #14 load_comments 损坏时备份并提示，不静默返回空 ----
+try:
+    win = main.MainWindow.__new__(main.MainWindow)
+    win._pending_load_warnings = []
+    d = tempfile.mkdtemp()
+    cf = os.path.join(d, 'seavo_comments.json')
+    open(cf, 'w', encoding='utf-8').write('{ this is : not valid json ]')
+    win.COMMENTS_FILE = cf
+    res = win.load_comments()
+    backed = os.path.exists(cf + '.bak') and not os.path.exists(cf)
+    warned = len(win._pending_load_warnings) > 0
+    check('#14 注释损坏时备份+提示', res == {} and backed and warned,
+          f'res={res} backed={backed} warned={warned}')
+except Exception as e:
+    check('#14 load_comments 备份', False, repr(e))
+
 print('\n' + '='*50)
 passed = sum(1 for _,c,_ in results if c)
 print(f"结果: {passed}/{len(results)} 通过")
