@@ -827,25 +827,16 @@ class SettingsDialog(QDialog):
             self.path_list.setCurrentCell(current_row + 1, 0)
     
     def _swap_rows(self, row1, row2):
+        # 本对话框的表只有 2 列（名称、路径），不要访问第 3 列
         name1 = self.path_list.item(row1, 0).text()
         path1 = self.path_list.item(row1, 1).text()
-        check1 = self.path_list.item(row1, 2).checkState()
         name2 = self.path_list.item(row2, 0).text()
         path2 = self.path_list.item(row2, 1).text()
-        check2 = self.path_list.item(row2, 2).checkState()
         self.path_list.setItem(row1, 0, QTableWidgetItem(name2))
         self.path_list.setItem(row1, 1, QTableWidgetItem(path2))
-        check_item1 = QTableWidgetItem()
-        check_item1.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-        check_item1.setCheckState(check2)
-        self.path_list.setItem(row1, 2, check_item1)
         self.path_list.setItem(row2, 0, QTableWidgetItem(name1))
         self.path_list.setItem(row2, 1, QTableWidgetItem(path1))
-        check_item2 = QTableWidgetItem()
-        check_item2.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-        check_item2.setCheckState(check1)
-        self.path_list.setItem(row2, 2, check_item2)
-        
+
     def save_settings(self):
         paths = []
         for row in range(self.path_list.rowCount()):
@@ -1012,15 +1003,26 @@ class QuickAccessSettingsDialog(QDialog):
             self.path_list.setCurrentCell(current_row + 1, 0)
     
     def _swap_rows(self, row1, row2):
+        # 本对话框的表有 3 列，第 3 列是“不显示预览”勾选框，交换时必须一并搬运
         name1 = self.path_list.item(row1, 0).text()
         path1 = self.path_list.item(row1, 1).text()
+        check1 = self.path_list.item(row1, 2).checkState()
         name2 = self.path_list.item(row2, 0).text()
         path2 = self.path_list.item(row2, 1).text()
+        check2 = self.path_list.item(row2, 2).checkState()
         self.path_list.setItem(row1, 0, QTableWidgetItem(name2))
         self.path_list.setItem(row1, 1, QTableWidgetItem(path2))
+        check_item1 = QTableWidgetItem()
+        check_item1.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+        check_item1.setCheckState(check2)
+        self.path_list.setItem(row1, 2, check_item1)
         self.path_list.setItem(row2, 0, QTableWidgetItem(name1))
         self.path_list.setItem(row2, 1, QTableWidgetItem(path1))
-    
+        check_item2 = QTableWidgetItem()
+        check_item2.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+        check_item2.setCheckState(check1)
+        self.path_list.setItem(row2, 2, check_item2)
+
     def reset_to_default(self):
         if hasattr(self.parent(), '_get_default_quick_access_paths'):
             default_paths = self.parent()._get_default_quick_access_paths()
@@ -2405,14 +2407,20 @@ class MainWindow(QMainWindow):
                             except (UnicodeDecodeError, UnicodeEncodeError):
                                 filename = info.filename
                         
-                        source = zf.open(info)
                         target_path = os.path.join(extract_dir, filename)
-                        
+
+                        # 防 Zip-slip：归档内文件名可能含 ../，校验解压目标必须在 extract_dir 内
+                        real_extract_dir = os.path.realpath(extract_dir)
+                        real_target = os.path.realpath(target_path)
+                        if real_target != real_extract_dir and not real_target.startswith(real_extract_dir + os.sep):
+                            raise Exception(f'压缩包包含非法路径，已阻止解压: {filename}')
+
                         if info.is_dir():
                             os.makedirs(target_path, exist_ok=True)
                         else:
                             os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                            with open(target_path, 'wb') as target:
+                            # 用 with 同时管理 source 与 target，确保异常时也释放读句柄
+                            with zf.open(info) as source, open(target_path, 'wb') as target:
                                 target.write(source.read())
             elif ext in ['.rar', '.7z']:
                 self._extract_with_7z(archive_path, extract_dir)
@@ -2438,25 +2446,27 @@ class MainWindow(QMainWindow):
         """移入回收站"""
         self._move_paths_to_recycle([file_path])
     
+    def _open_with_shell(self, path):
+        """用系统默认程序打开文件/文件夹，包含存在性检查与异常提示。
+        os.path.exists 通过不保证 startfile 成功（无关联程序、权限、网络盘失联等仍会抛错）。"""
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "警告", f"文件或文件夹不存在：{path}")
+            return
+        try:
+            os.startfile(path)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"无法打开：{os.path.basename(path)}\n{str(e)}")
+
     def on_file_double_clicked(self, index):
         """双击文件树项：直接打开文件或展开目录；双击空白区域打开当前文件夹"""
         if not index.isValid():
             # 双击空白区域：打开当前文件夹
-            if self.current_folder and os.path.exists(self.current_folder):
-                os.startfile(self.current_folder)
+            if self.current_folder:
+                self._open_with_shell(self.current_folder)
         else:
-            # 双击有效项：直接打开文件或展开目录
+            # 双击有效项：直接打开文件或文件夹
             file_path = self.file_model.filePath(index)
-            file_info = self.file_model.fileInfo(index)
-            
-            # 检查文件/文件夹是否存在
-            if os.path.exists(file_path):
-                if file_info.isFile():
-                    os.startfile(file_path)  # 直接打开文件
-                elif file_info.isDir():
-                    os.startfile(file_path)  # 打开文件夹（不再只是展开）
-            else:
-                QMessageBox.warning(self, "警告", f"文件或文件夹不存在：{file_path}")
+            self._open_with_shell(file_path)
     
     def new_project(self):
         # 获取默认新建项目文件夹
@@ -2531,11 +2541,18 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, '错误', f'创建子文件夹失败: {str(e)}')
     
     def _preview_text(self, file_path):
-        try:
+        # 先按 UTF-8 严格解码（不加 errors，否则非法字节被替换、永不抛异常，GBK 回退成死代码）；
+        # 失败再尝试 GBK，最后兜底用 UTF-8 + replace 保证总能显示
+        content = None
+        for encoding in ('utf-8', 'gbk'):
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+        if content is None:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            with open(file_path, 'r', encoding='gbk', errors='replace') as f:
                 content = f.read()
         self.preview_tab.setPlainText(content)
 
@@ -3109,8 +3126,10 @@ class MainWindow(QMainWindow):
             height, width, channel = frame_rgb.shape
             bytes_per_line = 3 * width
             q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            
-            return q_image
+
+            # copy() 让 QImage 拥有独立内存，否则它共享的 frame_rgb 缓冲在函数返回后被回收，
+            # 留下悬空指针（缩略图花屏甚至崩溃）
+            return q_image.copy()
         except Exception as e:
             return None
     
