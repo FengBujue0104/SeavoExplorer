@@ -20,15 +20,57 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTreeView, QTextEdit,
                                 QSplitter, QVBoxLayout, QHBoxLayout, QWidget,
                                 QLineEdit, QLabel, QPushButton, QFileDialog, QScrollArea,
                                 QMessageBox, QTabWidget, QFileSystemModel,
-                                QGroupBox, QMenu,
+                                QGroupBox, QMenu, QAbstractItemView, QShortcut,
                                 QDialog, QGridLayout, QTableWidget, QTableWidgetItem,
                                 QHeaderView, QFormLayout,
                                 QRadioButton, QButtonGroup, QInputDialog, QSplashScreen,
                                 QToolBar, QToolButton, QSizePolicy)
-from PyQt5.QtCore import QDir, Qt, QModelIndex, QThread, pyqtSignal, QRect
-from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen
+from PyQt5.QtCore import QDir, Qt, QModelIndex, QThread, pyqtSignal, QRect, QUrl, QMimeData, QTimer
+from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, QKeySequence, QFontDatabase
 
 _SPLASH_PIXMAP = None
+
+
+def _first_available_font(candidates):
+    """返回候选列表中系统已安装的第一个字体名，都没有则返回空串。"""
+    try:
+        families = set(QFontDatabase().families())
+    except Exception:
+        return ''
+    for name in candidates:
+        if name in families:
+            return name
+    return ''
+
+
+# UI 字体候选：微软雅黑系列优先，其次思源/苹方，最后通用无衬线
+_UI_FONT_CANDIDATES = [
+    'Microsoft YaHei UI', 'Microsoft YaHei', '微软雅黑',
+    'Source Han Sans SC', 'Noto Sans CJK SC', 'PingFang SC',
+    'Segoe UI', 'Arial',
+]
+# 等宽字体候选：用于代码/文本/压缩包等预览
+_MONO_FONT_CANDIDATES = ['Cascadia Mono', 'Consolas', 'Source Code Pro', 'Courier New']
+
+
+def get_mono_font(size=10):
+    """获取用于预览区的等宽字体。"""
+    name = _first_available_font(_MONO_FONT_CANDIDATES) or 'Courier New'
+    return QFont(name, size)
+
+
+def apply_app_font(app):
+    """为整个应用设置清晰的全局界面字体。"""
+    name = _first_available_font(_UI_FONT_CANDIDATES)
+    if not name:
+        return
+    font = QFont(name, 10)
+    try:
+        font.setStyleStrategy(QFont.PreferAntialias)
+    except Exception:
+        pass
+    app.setFont(font)
+
 
 def get_splash_pixmap():
     """预渲染启动画面，首次调用后缓存"""
@@ -310,7 +352,7 @@ class NewProjectDialog(QDialog):
         folder_group = QGroupBox('目标文件夹')
         folder_layout = QHBoxLayout()
         self.folder_label = QLabel(self.target_folder)
-        self.folder_label.setStyleSheet('font-family: Courier New;')
+        self.folder_label.setStyleSheet('font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;')
         self.folder_label.setToolTip('点击更改目标文件夹')
         self.folder_label.setCursor(Qt.PointingHandCursor)
         self.folder_label.mousePressEvent = self.select_folder
@@ -1014,6 +1056,134 @@ class QuickAccessSettingsDialog(QDialog):
         return self.paths
 
 
+class WizardDialog(QDialog):
+    """新手向导：分页介绍几项核心功能，仅首次自动弹出，可随时跳过。"""
+
+    # (标题, HTML 正文)
+    PAGES = [
+        (
+            '欢迎使用 SeavoExplorer',
+            '''
+            <p>SeavoExplorer 是面向 S/M 主板项目的文件浏览器，帮你快速定位项目、
+            预览工程文档、整理版本目录。</p>
+            <p>下面用几步介绍几项核心功能。你可以随时点击<b>“跳过”</b>关闭向导，
+            之后也能在菜单 <b>帮助 → 新手向导</b> 中重新打开。</p>
+            '''
+        ),
+        (
+            '一、配置并浏览项目',
+            '''
+            <p>首次使用请先在菜单 <b>设置 → 项目文件夹设置</b> 中添加包含项目的根目录。</p>
+            <p>程序会自动扫描其中符合命名规则的文件夹（以 <code>S</code> 或 <code>M</code>
+            开头 + 3~4 位数字，可选 <code>_注释</code>，如 <code>S1234_样机</code>）。</p>
+            <ul>
+            <li><b>单击</b>左侧项目行 → 在右侧文件树中查看该项目文件</li>
+            <li><b>双击编号列</b> → 在资源管理器中打开</li>
+            <li>顶部<b>搜索框</b> → 实时过滤项目列表</li>
+            </ul>
+            '''
+        ),
+        (
+            '二、预览工程文档',
+            '''
+            <p>在右侧文件树中<b>单击</b>文件即可在下方预览区查看内容，无需打开外部程序：</p>
+            <ul>
+            <li>文本 / PDF / Excel / Word / 图片 / 视频缩略图</li>
+            <li>压缩包（.zip/.rar/.7z）以树状结构显示内容</li>
+            </ul>
+            <p><b>双击</b>文件用系统默认程序打开；切换到<b>元数据</b>标签可查看文件详情。</p>
+            '''
+        ),
+        (
+            '三、文件操作（支持多选）',
+            '''
+            <p>文件树支持按住 <b>Ctrl</b> / <b>Shift</b> 多选，再进行批量操作：</p>
+            <ul>
+            <li><b>Ctrl+C / 右键复制</b>：复制到剪贴板，可在资源管理器粘贴，也保留程序内“粘贴副本”</li>
+            <li><b>Ctrl+V / 右键粘贴副本</b>：粘贴到选中文件夹或当前项目（自动处理重名）</li>
+            <li><b>F2</b>：重命名单个文件</li>
+            <li><b>Delete</b>：移入回收站</li>
+            <li>右键还可“添加到 zip 压缩包”“智能解压”</li>
+            </ul>
+            '''
+        ),
+        (
+            '四、新建项目与版本结构',
+            '''
+            <p>左侧 <b>“新建项目文件夹”</b>：按规则创建新的 S/M 项目根目录。</p>
+            <p>选中项目后的 <b>“新建文件夹内部结构”</b>：在项目内创建版本目录（如 <code>V01</code>）
+            及 BOM / SCH / 物料 / 评审 / 信号测试 等标准子文件夹。</p>
+            <p>更详细的说明请见菜单 <b>帮助 → 使用帮助</b>。祝使用愉快！</p>
+            '''
+        ),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('新手向导')
+        self.setMinimumSize(560, 460)
+        icon_path = parent._resource_path('favicon.ico') if parent and hasattr(parent, '_resource_path') else ''
+        if icon_path and os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
+        self.current_page = 0
+
+        layout = QVBoxLayout(self)
+
+        self.title_label = QLabel()
+        title_font = QFont()
+        title_font.setPointSize(13)
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
+        self.title_label.setStyleSheet('color: #2c3e50;')
+        layout.addWidget(self.title_label)
+
+        self.step_label = QLabel()
+        self.step_label.setStyleSheet('color: #7f8c8d;')
+        layout.addWidget(self.step_label)
+
+        self.body = QTextEdit()
+        self.body.setReadOnly(True)
+        layout.addWidget(self.body, 1)
+
+        btn_layout = QHBoxLayout()
+        self.skip_btn = QPushButton('跳过')
+        self.skip_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.skip_btn)
+        btn_layout.addStretch()
+        self.prev_btn = QPushButton('上一步')
+        self.prev_btn.clicked.connect(self.go_prev)
+        btn_layout.addWidget(self.prev_btn)
+        self.next_btn = QPushButton('下一步')
+        self.next_btn.clicked.connect(self.go_next)
+        btn_layout.addWidget(self.next_btn)
+        layout.addLayout(btn_layout)
+
+        self._render_page()
+
+    def _render_page(self):
+        title, html = self.PAGES[self.current_page]
+        self.title_label.setText(title)
+        self.step_label.setText(f'第 {self.current_page + 1} / {len(self.PAGES)} 步')
+        self.body.setHtml(html)
+        self.prev_btn.setEnabled(self.current_page > 0)
+        is_last = self.current_page == len(self.PAGES) - 1
+        self.next_btn.setText('完成' if is_last else '下一步')
+        self.skip_btn.setVisible(not is_last)
+
+    def go_prev(self):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._render_page()
+
+    def go_next(self):
+        if self.current_page < len(self.PAGES) - 1:
+            self.current_page += 1
+            self._render_page()
+        else:
+            self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1043,13 +1213,17 @@ class MainWindow(QMainWindow):
         self.pinned_folders = []
         self.comments = self.load_comments() or {}
         self.clipboard_path = None
+        self.clipboard_paths = []
 
         self.settings = self.load_settings()
         
         self.initUI()
         # 异步加载文件夹，提高启动速度
         self.load_filtered_folders_async()
-    
+        # 首次运行自动弹出新手向导（窗口显示后再弹，避免阻塞启动）
+        if not getattr(self, 'wizard_shown', False):
+            QTimer.singleShot(0, self.show_wizard)
+
     def initUI(self):
         self.setWindowTitle('主板项目文件浏览器')
         self.setGeometry(100, 100, 1400, 900)
@@ -1142,6 +1316,8 @@ class MainWindow(QMainWindow):
         self.file_model = QFileSystemModel()
         self.file_model.setFilter(QDir.NoDotAndDotDot | QDir.AllEntries)
         self.file_tree.setModel(self.file_model)
+        self.file_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_tree.setColumnWidth(0, 300)
         self.file_tree.setSortingEnabled(True)
         self.file_tree.sortByColumn(0, Qt.AscendingOrder)
@@ -1149,7 +1325,11 @@ class MainWindow(QMainWindow):
         self.file_tree.doubleClicked.connect(self.on_file_double_clicked)
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_tree.customContextMenuRequested.connect(self.on_file_tree_context_menu)
-        
+        self.copy_shortcut = QShortcut(QKeySequence.Copy, self)
+        self.copy_shortcut.activated.connect(self.copy_selected_items)
+        self.paste_shortcut = QShortcut(QKeySequence.Paste, self)
+        self.paste_shortcut.activated.connect(self.paste_to_selected_target)
+
         self.tabs = QTabWidget()
         
         # 文件预览容器
@@ -1159,7 +1339,7 @@ class MainWindow(QMainWindow):
         # 文本预览
         self.preview_tab = QTextEdit()
         self.preview_tab.setReadOnly(True)
-        self.preview_tab.setFont(QFont('Courier New', 10))
+        self.preview_tab.setFont(get_mono_font(10))
         self.preview_layout.addWidget(self.preview_tab)
         
         # 图片预览
@@ -1212,6 +1392,7 @@ class MainWindow(QMainWindow):
         settings_menu.addAction('快捷访问设置', self.show_quick_access_settings_dialog)
         settings_menu.addAction('7-Zip路径设置', self.show_7zip_settings_dialog)
         help_menu = menubar.addMenu('帮助')
+        help_menu.addAction('新手向导', self.show_wizard)
         help_menu.addAction('使用帮助', self.show_help)
         help_menu.addAction('关于', self.show_about)
     
@@ -1227,7 +1408,8 @@ class MainWindow(QMainWindow):
             'custom_folders': []
         }
         self.quick_access_paths = self._get_default_quick_access_paths()
-    
+        self.wizard_shown = False
+
     def _get_default_quick_access_paths(self):
         """获取默认快捷访问路径"""
         import ctypes
@@ -1286,6 +1468,8 @@ class MainWindow(QMainWindow):
                     self.quick_access_paths = config_data['quick_access_paths']
                 if 'pinned_folders' in config_data:
                     self.pinned_folders = config_data['pinned_folders']
+                if 'wizard_shown' in config_data:
+                    self.wizard_shown = config_data['wizard_shown']
         except Exception:
             self._init_default_settings()
         return self.project_paths
@@ -1325,7 +1509,8 @@ class MainWindow(QMainWindow):
                 'sort_by_number': getattr(self, 'sort_by_number', False),
                 'archive_tool_path': getattr(self, 'archive_tool_path', ''),
                 'quick_access_paths': getattr(self, 'quick_access_paths', []),
-                'pinned_folders': getattr(self, 'pinned_folders', [])
+                'pinned_folders': getattr(self, 'pinned_folders', []),
+                'wizard_shown': getattr(self, 'wizard_shown', False)
             }
             if hasattr(self, 'folder_structure'):
                 config_data['folder_structure'] = self.folder_structure
@@ -1427,7 +1612,198 @@ class MainWindow(QMainWindow):
             self._update_folder_status_bar()
         else:
             QMessageBox.warning(self, '警告', f'路径不存在: {path}')
-    
+
+    def _get_selected_file_paths(self):
+        selection_model = self.file_tree.selectionModel()
+        if not selection_model:
+            return []
+
+        paths = []
+        seen = set()
+        for index in selection_model.selectedRows(0):
+            file_path = self.file_model.filePath(index)
+            normalized_path = os.path.normpath(file_path)
+            if os.path.exists(file_path) and normalized_path not in seen:
+                seen.add(normalized_path)
+                paths.append(file_path)
+        return paths
+
+    def _get_primary_selected_file_path(self):
+        selected_paths = self._get_selected_file_paths()
+        if selected_paths:
+            return selected_paths[0]
+
+        current_index = self.file_tree.currentIndex()
+        if current_index.isValid():
+            file_path = self.file_model.filePath(current_index)
+            if os.path.exists(file_path):
+                return file_path
+        return None
+
+    def _select_single_file_index(self, index):
+        if not index.isValid():
+            return
+
+        selection_model = self.file_tree.selectionModel()
+        if not selection_model:
+            return
+
+        selection_model.clearSelection()
+        self.file_tree.setCurrentIndex(index)
+        selection_model.select(index, selection_model.Select | selection_model.Rows)
+
+    def _copy_paths_to_clipboard(self, file_paths):
+        valid_paths = []
+        seen = set()
+        for file_path in file_paths:
+            normalized_path = os.path.normpath(file_path)
+            if os.path.exists(file_path) and normalized_path not in seen:
+                seen.add(normalized_path)
+                valid_paths.append(file_path)
+
+        if not valid_paths:
+            QMessageBox.warning(self, '警告', '没有可复制的文件或文件夹')
+            return False
+
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(path) for path in valid_paths])
+        mime_data.setText('\n'.join(valid_paths))
+        QApplication.clipboard().setMimeData(mime_data)
+
+        self.clipboard_paths = list(valid_paths)
+        if len(valid_paths) == 1:
+            self.clipboard_path = valid_paths[0]
+            self.statusBar().showMessage(f"已复制，可在资源管理器中粘贴: {os.path.basename(valid_paths[0])}")
+        else:
+            self.clipboard_path = None
+            self.statusBar().showMessage(f"已复制 {len(valid_paths)} 个项目，可在资源管理器中粘贴")
+        return True
+
+    def _copy_path_to_clipboard(self, file_path):
+        """复制文件到系统剪贴板，并保留程序内粘贴副本功能"""
+        return self._copy_paths_to_clipboard([file_path])
+
+    def copy_selected_items(self):
+        selected_paths = self._get_selected_file_paths()
+        if selected_paths:
+            return self._copy_paths_to_clipboard(selected_paths)
+
+        selected_path = self._get_primary_selected_file_path()
+        if selected_path:
+            return self._copy_path_to_clipboard(selected_path)
+        return False
+
+    def paste_to_selected_target(self):
+        target = self.current_folder
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) == 1:
+            selected_path = selected_paths[0]
+            if os.path.isdir(selected_path):
+                target = selected_path
+            else:
+                target = os.path.dirname(selected_path)
+        elif len(selected_paths) > 1:
+            self.statusBar().showMessage("已选择多个项目，将粘贴到当前项目文件夹")
+        else:
+            selected_path = self._get_primary_selected_file_path()
+            if selected_path:
+                if os.path.isdir(selected_path):
+                    target = selected_path
+                else:
+                    target = os.path.dirname(selected_path)
+
+        if target and os.path.exists(target):
+            self.paste_copy(target)
+            return True
+        return False
+
+    def _create_unique_zip_path(self, parent_dir, base_name):
+        zip_name = base_name + '.zip'
+        zip_path = os.path.join(parent_dir, zip_name)
+        counter = 1
+        while os.path.exists(zip_path):
+            zip_name = f"{base_name} ({counter}).zip"
+            zip_path = os.path.join(parent_dir, zip_name)
+            counter += 1
+        return zip_path, zip_name
+
+    def _write_path_to_zip(self, zf, source_path, base_dir):
+        if os.path.isfile(source_path):
+            zf.write(source_path, os.path.relpath(source_path, base_dir))
+            return
+
+        folder_arcname = os.path.relpath(source_path, base_dir).replace('\\', '/') + '/'
+        zf.writestr(folder_arcname, '')
+        for root, dirs, files in os.walk(source_path):
+            rel_root = os.path.relpath(root, base_dir)
+            if rel_root != '.':
+                dir_arcname = rel_root.replace('\\', '/') + '/'
+                zf.writestr(dir_arcname, '')
+            for dir_name in dirs:
+                dir_path = os.path.join(root, dir_name)
+                dir_arcname = os.path.relpath(dir_path, base_dir).replace('\\', '/') + '/'
+                zf.writestr(dir_arcname, '')
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                arcname = os.path.relpath(file_path, base_dir)
+                zf.write(file_path, arcname)
+
+    def _move_paths_to_recycle(self, file_paths):
+        valid_paths = []
+        seen = set()
+        for file_path in file_paths:
+            normalized_path = os.path.normpath(file_path)
+            if os.path.exists(file_path) and normalized_path not in seen:
+                seen.add(normalized_path)
+                valid_paths.append(os.path.abspath(file_path))
+
+        if not valid_paths:
+            QMessageBox.warning(self, '警告', '没有可移入回收站的文件或文件夹')
+            return False
+
+        try:
+            from ctypes import wintypes
+
+            class SHFILEOPSTRUCT(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", wintypes.HWND),
+                    ("wFunc", wintypes.UINT),
+                    ("pFrom", ctypes.c_wchar_p),
+                    ("pTo", ctypes.c_wchar_p),
+                    ("fFlags", wintypes.WORD),
+                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", wintypes.LPVOID),
+                    ("lpszProgressTitle", ctypes.c_wchar_p)
+                ]
+
+            SHFileOperation = ctypes.windll.shell32.SHFileOperationW
+            FO_DELETE = 0x0003
+            FOF_ALLOWUNDO = 0x0040
+            FOF_NOCONFIRMATION = 0x0010
+            FOF_SILENT = 0x0004
+
+            p_from = '\x00'.join(valid_paths) + '\x00\x00'
+
+            shfo = SHFILEOPSTRUCT()
+            shfo.hwnd = int(self.winId())
+            shfo.wFunc = FO_DELETE
+            shfo.pFrom = p_from
+            shfo.pTo = None
+            shfo.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+
+            result = SHFileOperation(ctypes.byref(shfo))
+            if result == 0:
+                if len(valid_paths) == 1:
+                    self.statusBar().showMessage(f"已移入回收站: {os.path.basename(valid_paths[0])}")
+                else:
+                    self.statusBar().showMessage(f"已移入回收站: {len(valid_paths)} 个项目")
+                return True
+
+            QMessageBox.warning(self, "错误", f"移入回收站失败，错误码: {result}")
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"移入回收站失败: {str(e)}")
+        return False
+
     def _create_recycle_btn(self):
         """创建回收站按钮"""
         btn = QPushButton('🗑')
@@ -1660,59 +2036,71 @@ class MainWindow(QMainWindow):
         """文件树右键菜单"""
         index = self.file_tree.indexAt(position)
         menu = QMenu(self)
-        
+
         if index.isValid():
-            # 右键点击了文件/文件夹
-            file_path = self.file_model.filePath(index)
-            if not os.path.exists(file_path):
+            clicked_path = self.file_model.filePath(index)
+            selected_paths = self._get_selected_file_paths()
+            if clicked_path not in selected_paths:
+                self._select_single_file_index(index)
+
+            selected_paths = self._get_selected_file_paths()
+            if not selected_paths:
                 return
-            
+
+            multi_selected = len(selected_paths) > 1
+            file_path = selected_paths[0]
             file_info = self.file_model.fileInfo(index)
-            is_dir = file_info.isDir()
             ext = os.path.splitext(file_path)[1].lower()
             is_archive = ext in ['.zip', '.rar', '.7z']
-            
+
             copy_action = menu.addAction('复制')
-            paste_copy_action = menu.addAction('粘贴副本')
-            rename_action = menu.addAction('重命名')
-            menu.addSeparator()
-            
-            # 压缩功能
             add_to_zip_action = menu.addAction('添加到zip压缩包')
-            
-            # 解压功能（仅对压缩包显示）
+
+            paste_copy_action = None
+            rename_action = None
             extract_action = None
-            if is_archive:
-                extract_action = menu.addAction('智能解压')
-            
-            menu.addSeparator()
-            recycle_action = menu.addAction('移入回收站')
-            
-            # 粘贴副本只在剪贴板有内容时可用
-            paste_copy_action.setEnabled(self.clipboard_path is not None and os.path.exists(self.clipboard_path))
-            
+            recycle_action = None
+
+            if not multi_selected:
+                paste_copy_action = menu.addAction('粘贴副本')
+                rename_action = menu.addAction('重命名')
+                menu.addSeparator()
+                if is_archive:
+                    extract_action = menu.addAction('智能解压')
+                menu.addSeparator()
+                recycle_action = menu.addAction('移入回收站')
+                paste_copy_action.setEnabled(self._has_pasteable_clipboard())
+            else:
+                menu.addSeparator()
+                recycle_action = menu.addAction('移入回收站')
+
             action = menu.exec_(self.file_tree.viewport().mapToGlobal(position))
-            
+
             if action == copy_action:
-                self.clipboard_path = file_path
-                self.statusBar().showMessage(f"已复制: {os.path.basename(file_path)}")
-            elif action == paste_copy_action:
-                self.paste_copy(file_path)
-            elif action == rename_action:
-                self.rename_item(file_path)
+                self._copy_paths_to_clipboard(selected_paths)
             elif action == add_to_zip_action:
-                self.add_to_zip(file_path)
-            elif extract_action and action == extract_action:
+                if multi_selected:
+                    self.add_paths_to_zip(selected_paths)
+                else:
+                    self.add_to_zip(file_path)
+            elif not multi_selected and action == paste_copy_action:
+                self.paste_copy(file_path)
+            elif not multi_selected and action == rename_action:
+                self.rename_item(file_path)
+            elif not multi_selected and extract_action and action == extract_action:
                 self.smart_extract(file_path)
             elif action == recycle_action:
-                self.move_to_recycle(file_path)
+                if multi_selected:
+                    self._move_paths_to_recycle(selected_paths)
+                else:
+                    self.move_to_recycle(file_path)
         else:
             # 右键点击了空白区域
             paste_copy_action = menu.addAction('粘贴副本')
-            paste_copy_action.setEnabled(self.clipboard_path is not None and os.path.exists(self.clipboard_path))
-            
+            paste_copy_action.setEnabled(self._has_pasteable_clipboard())
+
             action = menu.exec_(self.file_tree.viewport().mapToGlobal(position))
-            
+
             if action == paste_copy_action:
                 # 粘贴到当前文件夹
                 if self.current_folder and os.path.exists(self.current_folder):
@@ -1720,45 +2108,68 @@ class MainWindow(QMainWindow):
                 else:
                     QMessageBox.warning(self, "警告", "请先选择一个项目文件夹")
     
+    def _has_pasteable_clipboard(self):
+        """剪贴板中是否有可粘贴的有效路径"""
+        for p in (self.clipboard_paths or []):
+            if os.path.exists(p):
+                return True
+        return bool(self.clipboard_path) and os.path.exists(self.clipboard_path)
+
     def paste_copy(self, target_path):
-        """粘贴副本到目标路径"""
-        if not self.clipboard_path or not os.path.exists(self.clipboard_path):
+        """粘贴副本到目标路径，支持多选"""
+        sources = [p for p in (self.clipboard_paths or []) if os.path.exists(p)]
+        if not sources and self.clipboard_path and os.path.exists(self.clipboard_path):
+            sources = [self.clipboard_path]
+        if not sources:
             QMessageBox.warning(self, "警告", "剪贴板中没有有效的文件")
             return
-        
-        try:
-            base_name = os.path.basename(self.clipboard_path)
-            if os.path.isdir(target_path):
-                dest = os.path.join(target_path, base_name)
+
+        # 目标目录：若 target_path 是目录则用它，否则用其所在目录
+        target_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
+
+        pasted = 0
+        errors = []
+        for source in sources:
+            try:
+                self._paste_single(source, target_dir)
+                pasted += 1
+            except Exception as e:
+                errors.append(f"{os.path.basename(source)}: {str(e)}")
+
+        if errors:
+            QMessageBox.warning(self, "错误", "粘贴副本失败:\n" + "\n".join(errors))
+        if pasted == 1:
+            self.statusBar().showMessage(f"已粘贴副本: {os.path.basename(sources[0])}")
+        elif pasted > 1:
+            self.statusBar().showMessage(f"已粘贴 {pasted} 个副本")
+
+    def _paste_single(self, source_path, target_dir):
+        """复制单个文件/文件夹到目标目录，处理重名"""
+        base_name = os.path.basename(source_path)
+        dest = os.path.join(target_dir, base_name)
+
+        # 处理重名：如果目标已存在，则生成副本名称
+        if os.path.exists(dest):
+            name, ext = os.path.splitext(base_name)
+            # 检查原文件名是否已以 "_副本数字" 结尾
+            match = re.search(r'_副本(\d+)$', name)
+            if match:
+                # 原文件已经是副本，从该数字继续递增
+                base_name_without_copy = name[:match.start()]
+                counter = int(match.group(1)) + 1
             else:
-                dest = os.path.join(os.path.dirname(target_path), base_name)
-            
-            # 处理重名：如果目标已存在，则生成副本名称
-            if os.path.exists(dest):
-                name, ext = os.path.splitext(base_name)
-                # 检查原文件名是否已以 "_副本数字" 结尾
-                match = re.search(r'_副本(\d+)$', name)
-                if match:
-                    # 原文件已经是副本，从该数字继续递增
-                    base_name_without_copy = name[:match.start()]
-                    counter = int(match.group(1)) + 1
-                else:
-                    # 原文件不是副本，从1开始
-                    base_name_without_copy = name
-                    counter = 1
-                while os.path.exists(dest):
-                    new_name = f"{base_name_without_copy}_副本{counter}{ext}"
-                    dest = os.path.join(os.path.dirname(dest), new_name)
-                    counter += 1
-            
-            if os.path.isdir(self.clipboard_path):
-                shutil.copytree(self.clipboard_path, dest)
-            else:
-                shutil.copy2(self.clipboard_path, dest)
-            
-            self.statusBar().showMessage(f"已粘贴副本: {os.path.basename(dest)}")
-        except Exception as e:
-            QMessageBox.warning(self, "错误", f"粘贴副本失败: {str(e)}")
+                # 原文件不是副本，从1开始
+                base_name_without_copy = name
+                counter = 1
+            while os.path.exists(dest):
+                new_name = f"{base_name_without_copy}_副本{counter}{ext}"
+                dest = os.path.join(target_dir, new_name)
+                counter += 1
+
+        if os.path.isdir(source_path):
+            shutil.copytree(source_path, dest)
+        else:
+            shutil.copy2(source_path, dest)
     
     def rename_item(self, file_path):
         """重命名文件或文件夹"""
@@ -1792,33 +2203,54 @@ class MainWindow(QMainWindow):
         """将文件或文件夹添加到zip压缩包"""
         try:
             import zipfile
-            
+
             parent_dir = os.path.dirname(source_path)
             base_name = os.path.basename(source_path)
-            zip_name = base_name + '.zip'
-            zip_path = os.path.join(parent_dir, zip_name)
-            
-            # 处理重名
-            counter = 1
-            while os.path.exists(zip_path):
-                zip_name = f"{base_name} ({counter}).zip"
-                zip_path = os.path.join(parent_dir, zip_name)
-                counter += 1
-            
+            zip_path, zip_name = self._create_unique_zip_path(parent_dir, base_name)
+
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                if os.path.isfile(source_path):
-                    zf.write(source_path, base_name)
-                else:
-                    for root, dirs, files in os.walk(source_path):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, parent_dir)
-                            zf.write(file_path, arcname)
-            
+                self._write_path_to_zip(zf, source_path, parent_dir)
+
             self.statusBar().showMessage(f"已创建压缩包: {zip_name}")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建压缩包失败: {str(e)}")
-    
+
+    def add_paths_to_zip(self, source_paths):
+        """将多个文件或文件夹添加到同一个zip压缩包"""
+        valid_paths = []
+        seen = set()
+        for source_path in source_paths:
+            normalized_path = os.path.normpath(source_path)
+            if os.path.exists(source_path) and normalized_path not in seen:
+                seen.add(normalized_path)
+                valid_paths.append(source_path)
+
+        if not valid_paths:
+            QMessageBox.warning(self, "警告", "没有可压缩的文件或文件夹")
+            return
+
+        try:
+            import zipfile
+
+            parent_dirs = {os.path.dirname(path) for path in valid_paths}
+            if len(parent_dirs) == 1:
+                target_dir = parent_dirs.pop()
+                base_dir = target_dir
+            else:
+                common_path = os.path.commonpath(valid_paths)
+                base_dir = common_path if os.path.isdir(common_path) else os.path.dirname(common_path)
+                target_dir = base_dir
+
+            zip_path, zip_name = self._create_unique_zip_path(target_dir, '选中文件')
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for source_path in valid_paths:
+                    self._write_path_to_zip(zf, source_path, base_dir)
+
+            self.statusBar().showMessage(f"已创建压缩包: {zip_name}")
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"创建压缩包失败: {str(e)}")
+
     @staticmethod
     def _resource_path(relative_path):
         if hasattr(sys, '_MEIPASS'):
@@ -2004,44 +2436,7 @@ class MainWindow(QMainWindow):
     
     def move_to_recycle(self, file_path):
         """移入回收站"""
-        try:
-            from ctypes import wintypes
-            
-            class SHFILEOPSTRUCT(ctypes.Structure):
-                _fields_ = [
-                    ("hwnd", wintypes.HWND),
-                    ("wFunc", wintypes.UINT),
-                    ("pFrom", ctypes.c_wchar_p),
-                    ("pTo", ctypes.c_wchar_p),
-                    ("fFlags", wintypes.WORD),
-                    ("fAnyOperationsAborted", wintypes.BOOL),
-                    ("hNameMappings", wintypes.LPVOID),
-                    ("lpszProgressTitle", ctypes.c_wchar_p)
-                ]
-            
-            SHFileOperation = ctypes.windll.shell32.SHFileOperationW
-            FO_DELETE = 0x0003
-            FOF_ALLOWUNDO = 0x0040
-            FOF_NOCONFIRMATION = 0x0010
-            FOF_SILENT = 0x0004
-            
-            file_path = os.path.abspath(file_path)
-            pFrom = file_path + '\x00'
-            
-            shfo = SHFILEOPSTRUCT()
-            shfo.hwnd = int(self.winId())
-            shfo.wFunc = FO_DELETE
-            shfo.pFrom = pFrom
-            shfo.pTo = None
-            shfo.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
-            
-            result = SHFileOperation(ctypes.byref(shfo))
-            if result == 0:
-                self.statusBar().showMessage(f"已移入回收站: {os.path.basename(file_path)}")
-            else:
-                QMessageBox.warning(self, "错误", f"移入回收站失败，错误码: {result}")
-        except Exception as e:
-            QMessageBox.warning(self, "错误", f"移入回收站失败: {str(e)}")
+        self._move_paths_to_recycle([file_path])
     
     def on_file_double_clicked(self, index):
         """双击文件树项：直接打开文件或展开目录；双击空白区域打开当前文件夹"""
@@ -2451,17 +2846,34 @@ class MainWindow(QMainWindow):
             return f'{size / (1024 * 1024 * 1024):.2f} GB'
     
     def show_about(self):
-        icon_path = self._resource_path('favicon.ico')
-        about_text = 'SeavoExplorer - 主板项目文件浏览器\n\n版本 0.1'
-        if os.path.exists(icon_path):
+        about_text = 'SeavoExplorer - 主板项目文件浏览器\n\n版本 0.2'
+        # 关于页 logo 优先用高清 PNG 源（清晰放大），回退到多尺寸 ico
+        png_path = self._resource_path('favicon_src.png')
+        ico_path = self._resource_path('favicon.ico')
+        pixmap = None
+        if os.path.exists(png_path):
+            pixmap = QPixmap(png_path)
+        elif os.path.exists(ico_path):
+            pixmap = QIcon(ico_path).pixmap(128, 128)
+
+        if pixmap is not None and not pixmap.isNull():
+            scaled = pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             msg = QMessageBox(self)
             msg.setWindowTitle('关于')
             msg.setText(about_text)
-            msg.setIconPixmap(QIcon(icon_path).pixmap(64, 64))
+            msg.setIconPixmap(scaled)
             msg.exec_()
         else:
             QMessageBox.about(self, '关于', about_text)
     
+    def show_wizard(self):
+        """打开新手向导，并标记为已显示。"""
+        dialog = WizardDialog(self)
+        dialog.exec_()
+        if not getattr(self, 'wizard_shown', False):
+            self.wizard_shown = True
+            self.save_settings_to_file(self.settings, self.include_subfolders)
+
     def show_help(self):
         help_dialog = QDialog(self)
         help_dialog.setWindowTitle('使用帮助')
@@ -2472,105 +2884,128 @@ class MainWindow(QMainWindow):
         help_text.setReadOnly(True)
         help_text.setHtml('''
 <h2 style="color: #2c3e50;">SeavoExplorer 使用帮助</h2>
+<p style="color: #7f8c8d;">主板/子卡项目文件浏览器 —— 快速定位项目、预览工程文档、整理版本目录。
+首次使用建议先看 <b>帮助 → 新手向导</b>。</p>
 
 <h3 style="color: #2980b9;">一、项目文件夹管理</h3>
-<p><b>1. 配置项目文件夹路径</b></p>
-<p>点击菜单 <b>设置 → 项目文件夹设置</b>，添加包含项目文件夹的根目录。程序会自动扫描这些目录下符合命名规则的文件夹。</p>
-<p>项目文件夹命名规则：<code>S001</code>、<code>M001</code>、<code>S002_注释</code>、<code>M003_说明</code> 等，以 S（主板）或 M（子卡）开头，后跟3-4位数字，可选下划线加注释。</p>
-<p>勾选<b>"包含子文件夹"</b>可递归扫描子目录中的项目文件夹；勾选<b>"按编号排序"</b>可忽略来源目录分组，统一按编号排序。</p>
+<p><b>1. 配置项目根目录</b></p>
+<p>点击菜单 <b>设置 → 项目文件夹设置</b>，添加一个或多个包含项目文件夹的根目录。程序会自动扫描这些目录下符合命名规则的文件夹。</p>
+<p>命名规则：以 <b>S</b>（主板）或 <b>M</b>（子卡）开头，后跟 <b>3~4 位数字</b>，可选 <code>_注释</code> 后缀。例如：<code>S001</code>、<code>M1234</code>、<code>S002_样机</code>、<code>M003_说明</code>。</p>
+<ul>
+<li>勾选<b>"包含子文件夹"</b>：递归扫描子目录中的项目文件夹</li>
+<li>勾选<b>"按编号排序"</b>：忽略来源目录分组，所有项目统一按编号大小排序；不勾选时先按根目录添加顺序分组，组内再按编号排序</li>
+</ul>
 
 <p><b>2. 项目列表操作</b></p>
 <ul>
 <li><b>单击</b>项目行：在右侧文件树中显示该项目的文件</li>
-<li><b>双击编号列</b>：在系统资源管理器中打开该文件夹</li>
-<li><b>双击注释列</b>：编辑项目注释</li>
+<li><b>双击编号列</b>：在系统资源管理器中打开该项目文件夹</li>
+<li><b>双击注释列</b>：编辑项目注释（自动保存到 <code>seavo_comments.json</code>）</li>
+<li><b>右键项目行</b>：置顶 / 取消置顶。置顶项以加粗显示并排在列表前部</li>
 <li><b>文件夹搜索框</b>：输入关键词实时过滤项目列表</li>
 </ul>
+<p style="color: #7f8c8d;">注释显示优先级：若 <code>seavo_comments.json</code> 中对该文件夹有注释则优先显示，否则使用文件夹名的 <code>_注释</code> 后缀。</p>
 
-<h3 style="color: #2980b9;">二、文件树与文件操作</h3>
+<h3 style="color: #2980b9;">二、文件浏览与操作</h3>
 <p><b>1. 文件浏览</b></p>
 <ul>
-<li>单击文件：在下方预览区显示文件内容</li>
-<li>双击文件：使用系统默认程序打开文件</li>
-<li>双击文件夹：在系统资源管理器中打开</li>
-<li>双击空白区域：在系统资源管理器中打开当前项目文件夹</li>
+<li>单击文件：在下方<b>文件预览</b>区显示内容；<b>元数据</b>标签页显示大小、创建/修改时间等详情</li>
+<li>双击文件：用系统默认程序打开</li>
+<li>双击文件夹：在资源管理器中打开</li>
+<li>双击空白区域：在资源管理器中打开当前项目文件夹</li>
 </ul>
 
-<p><b>2. 右键菜单</b></p>
+<p><b>2. 多选操作</b></p>
+<p>文件树支持多选：按住 <b>Ctrl</b> 点选多个项目，或按住 <b>Shift</b> 选择连续范围。多选后可批量复制、删除、压缩。</p>
+
+<p><b>3. 右键菜单</b></p>
+<p>选中<b>单个</b>文件/文件夹时：</p>
 <ul>
-<li><b>复制</b>：将文件/文件夹路径复制到剪贴板</li>
-<li><b>粘贴副本</b>：将剪贴板中的文件/文件夹复制到当前位置（自动处理重名）</li>
-<li><b>重命名</b>：重命名文件或文件夹（也可按 F2 键）</li>
-<li><b>添加到zip压缩包</b>：将选中的文件/文件夹压缩为同名 .zip 文件</li>
-<li><b>智能解压</b>：仅对 .zip/.rar/.7z 文件显示，自动判断解压方式</li>
-<li><b>移入回收站</b>：将文件/文件夹移入系统回收站</li>
+<li><b>复制</b>：复制到剪贴板，既可在资源管理器中粘贴，也可用程序内"粘贴副本"</li>
+<li><b>粘贴副本</b>：把剪贴板中的内容复制到当前位置，自动处理重名（追加 <code>_副本N</code>）</li>
+<li><b>重命名</b>：重命名文件或文件夹（也可按 F2）</li>
+<li><b>添加到zip压缩包</b>：压缩为同名 .zip 文件</li>
+<li><b>智能解压</b>：仅对 .zip/.rar/.7z 显示</li>
+<li><b>移入回收站</b>：移入系统回收站</li>
+</ul>
+<p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>添加到zip压缩包</b>、<b>移入回收站</b>。</p>
+<p>在<b>空白处</b>右键：仅显示<b>粘贴副本</b>，粘贴到当前项目文件夹。</p>
+
+<p><b>4. 复制与粘贴的目标规则</b></p>
+<ul>
+<li>复制（单个或多个）后，"粘贴副本"会把<b>全部</b>已复制项粘到目标位置</li>
+<li>粘贴时若<b>选中了一个文件夹</b>，粘贴到该文件夹内；若选中的是文件，则粘到其所在目录</li>
+<li>若<b>选中了多个</b>项目，则粘贴到当前项目根文件夹</li>
 </ul>
 
 <h3 style="color: #2980b9;">三、文件预览</h3>
 <p>单击文件树中的文件，下方预览区会自动显示内容：</p>
 <table border="1" cellpadding="4" cellspacing="0" style="border-collapse: collapse;">
 <tr style="background: #ecf0f1;"><th>文件类型</th><th>支持格式</th><th>说明</th></tr>
-<tr><td>文本文件</td><td>.txt .csv .log .bom .drc .rep .rpt .md .json .xml .html .ini .cfg 等</td><td>直接显示文本内容</td></tr>
-<tr><td>PDF文件</td><td>.pdf</td><td>多页预览，可翻页查看</td></tr>
-<tr><td>Excel文件</td><td>.xlsx .xlsm .xls</td><td>表格形式预览</td></tr>
-<tr><td>Word文件</td><td>.docx .doc</td><td>文档内容预览</td></tr>
-<tr><td>图片文件</td><td>.jpg .png .bmp .gif .tiff .webp .svg 等</td><td>缩略图预览，点击可查看大图</td></tr>
-<tr><td>视频文件</td><td>.mp4 .avi .mov .mkv .wmv 等</td><td>显示视频缩略图（需安装OpenCV）</td></tr>
-<tr><td>压缩包</td><td>.zip .rar .7z</td><td>树状结构显示压缩包内容</td></tr>
+<tr><td>文本文件</td><td>.txt .csv .log .bom .drc .rep .rpt .md .json .xml .html .htm .ini .cfg</td><td>直接显示文本（UTF-8/GBK 自动识别）</td></tr>
+<tr><td>PDF 文件</td><td>.pdf</td><td>多页预览，可翻页查看</td></tr>
+<tr><td>Excel 文件</td><td>.xlsx .xlsm .xls</td><td>表格形式预览</td></tr>
+<tr><td>Word 文件</td><td>.docx .doc</td><td>文档内容预览</td></tr>
+<tr><td>图片文件</td><td>.jpg .jpeg .png .bmp .gif .tiff .tif .webp .svg</td><td>缩略图预览，点击查看大图</td></tr>
+<tr><td>视频文件</td><td>.mp4 .avi .mov .mkv .flv .wmv .m4v .webm .mpg .mpeg .3gp</td><td>显示视频缩略图（需 OpenCV）</td></tr>
+<tr><td>压缩包</td><td>.zip .rar .7z</td><td>树状结构显示内容</td></tr>
 </table>
-<p>点击<b>元数据</b>标签页可查看文件的详细信息（大小、创建时间、修改时间等）。</p>
+<p style="color: #7f8c8d;">加密工程文件（.opj .dsn .sch .brd .dbk .dsnlck）无法预览，会显示提示信息而非二进制内容；请用对应 EDA 软件打开。</p>
 
 <h3 style="color: #2980b9;">四、压缩包操作</h3>
 <p><b>1. 智能解压</b></p>
-<p>右键压缩包文件选择"智能解压"，程序会自动判断：</p>
+<p>右键压缩包选择"智能解压"，程序自动判断：</p>
 <ul>
-<li>压缩包内只有一个顶层项目 → 直接解压到当前目录</li>
-<li>压缩包内有多个顶层项目 → 创建与压缩包同名的文件夹，解压到其中</li>
+<li>包内只有一个顶层项目 → 直接解压到当前目录</li>
+<li>包内有多个顶层项目 → 创建与压缩包同名的文件夹，解压到其中（避免文件散落）</li>
 </ul>
-<p>ZIP 文件使用内置解压，RAR/7z 文件需要 7-Zip 支持。</p>
+<p>.zip 使用内置解压；.rar / .7z 需要 7-Zip 支持。</p>
 
-<p><b>2. 添加到zip压缩包</b></p>
-<p>右键任意文件或文件夹，选择"添加到zip压缩包"，会在同目录下生成同名 .zip 文件。</p>
+<p><b>2. 添加到 zip 压缩包</b></p>
+<ul>
+<li>选中单个项目：在同目录下生成同名 .zip（重名时自动追加序号）</li>
+<li>选中多个项目：一并打包为一个 .zip</li>
+</ul>
 
 <p><b>3. 7-Zip 路径设置</b></p>
-<p>点击菜单 <b>设置 → 7-Zip路径设置</b>，指定 7z.exe 的路径。程序会自动检测以下位置：</p>
-<ul>
+<p>菜单 <b>设置 → 7-Zip路径设置</b> 可手动指定 7z.exe。程序按以下顺序自动查找：</p>
+<ol>
+<li>设置中手动指定的路径</li>
 <li>程序所在目录下的 7z.exe</li>
 <li>C:\\Program Files\\7-Zip\\7z.exe</li>
 <li>C:\\Program Files (x86)\\7-Zip\\7z.exe</li>
-</ul>
-<p>如自动检测失败，请手动指定路径。</p>
+</ol>
 
 <h3 style="color: #2980b9;">五、快捷访问栏</h3>
-<p>菜单栏下方的快捷访问栏提供常用文件夹的快速入口。</p>
-<p><b>1. 普通按钮</b>（默认样式）：点击后在文件树中显示该文件夹内容</p>
-<p><b>2. 不显示预览按钮</b>（灰色斜体样式）：点击后在系统资源管理器中打开文件夹</p>
-<p style="color: #7f8c8d;">提示：大文件夹（如磁盘根目录）和网络文件夹建议勾选"不显示预览"，避免文件树加载缓慢。</p>
+<p>菜单栏下方的快捷访问栏提供常用文件夹的快速入口：</p>
+<ul>
+<li><b>普通按钮</b>（默认样式）：点击后在文件树中显示该文件夹内容</li>
+<li><b>不显示预览按钮</b>（灰色斜体）：点击后直接在资源管理器中打开</li>
+</ul>
+<p style="color: #7f8c8d;">提示：磁盘根目录、网络文件夹等大目录建议设为"不显示预览"，避免文件树加载缓慢。</p>
+<p>菜单 <b>设置 → 快捷访问设置</b> 可添加、删除、排序快捷项，并为每项设置名称、路径和是否不显示预览。</p>
 
-<p><b>自定义快捷访问</b>：点击菜单 <b>设置 → 快捷访问设置</b>，可添加、删除、排序快捷访问项，每项可设置名称、路径和是否不显示预览。</p>
-
-<h3 style="color: #2980b9;">六、新建项目</h3>
+<h3 style="color: #2980b9;">六、新建项目与版本结构</h3>
 <p><b>1. 新建项目文件夹</b></p>
-<p>点击左侧<b>"新建项目文件夹"</b>按钮，输入项目编号、选择类型（S/M）和保存位置，程序会自动创建符合命名规则的项目文件夹。</p>
-
+<p>点击左侧<b>"新建项目文件夹"</b>，选择类型（S/M）、输入编号和保存位置，程序自动创建符合命名规则的项目文件夹。</p>
 <p><b>2. 新建文件夹内部结构</b></p>
-<p>选中一个项目文件夹后，点击<b>"新建文件夹内部结构"</b>按钮，可创建版本文件夹（如 V01）及其下的标准化子文件夹（BOM、SCH、物料、评审、信号测试等），也可自定义子文件夹名称。</p>
+<p>选中一个项目后，点击<b>"新建文件夹内部结构"</b>，可创建版本文件夹（如 V01）及标准子文件夹（BOM、SCH、物料、评审、信号测试），也可自定义子文件夹。上次选择的模板会被记住。</p>
 
 <h3 style="color: #2980b9;">七、快捷键</h3>
 <table border="1" cellpadding="4" cellspacing="0" style="border-collapse: collapse;">
 <tr style="background: #ecf0f1;"><th>快捷键</th><th>功能</th></tr>
 <tr><td>F5</td><td>刷新项目列表和文件树</td></tr>
-<tr><td>F2</td><td>重命名文件树中选中的文件/文件夹</td></tr>
-<tr><td>Ctrl+C</td><td>复制选中的文件/文件夹</td></tr>
-<tr><td>Ctrl+V</td><td>粘贴副本到当前位置</td></tr>
-<tr><td>Delete</td><td>将选中的文件/文件夹移入回收站</td></tr>
+<tr><td>F2</td><td>重命名文件树中选中的单个文件/文件夹</td></tr>
+<tr><td>Ctrl+C</td><td>复制选中的文件/文件夹（支持多选）</td></tr>
+<tr><td>Ctrl+V</td><td>粘贴副本到选中文件夹或当前项目</td></tr>
+<tr><td>Delete</td><td>将选中的文件/文件夹移入回收站（支持多选）</td></tr>
 </table>
 
-<h3 style="color: #2980b9;">八、其他功能</h3>
+<h3 style="color: #2980b9;">八、其他</h3>
 <ul>
 <li><b>回收站</b>：状态栏右侧的回收站按钮可快速打开系统回收站</li>
-<li><b>项目注释</b>：双击项目列表的注释列可编辑注释，注释会自动保存</li>
-<li><b>设置持久化</b>：所有设置（项目路径、快捷访问、7-Zip路径等）自动保存到配置文件，下次启动自动加载</li>
+<li><b>新手向导</b>：菜单 <b>帮助 → 新手向导</b> 随时重新查看核心功能介绍</li>
+<li><b>设置持久化</b>：所有设置（项目路径、快捷访问、7-Zip 路径、排序选项等）自动保存到配置文件，下次启动自动加载</li>
 </ul>
 ''')
         
@@ -2686,41 +3121,37 @@ class MainWindow(QMainWindow):
                 self.file_model.setRootPath(self.current_folder)
                 self.file_tree.setRootIndex(self.file_model.index(self.current_folder))
         elif event.key() == Qt.Key_F2:
-            selected_index = self.file_tree.currentIndex()
-            if selected_index.isValid():
-                file_path = self.file_model.filePath(selected_index)
-                if os.path.exists(file_path):
-                    self.rename_item(file_path)
+            selected_paths = self._get_selected_file_paths()
+            if len(selected_paths) == 1:
+                self.rename_item(selected_paths[0])
+            elif len(selected_paths) > 1:
+                self.statusBar().showMessage("请选择单个文件或文件夹进行重命名")
+            else:
+                selected_path = self._get_primary_selected_file_path()
+                if selected_path:
+                    self.rename_item(selected_path)
         elif event.key() == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
-            selected_index = self.file_tree.currentIndex()
-            if selected_index.isValid():
-                file_path = self.file_model.filePath(selected_index)
-                if os.path.exists(file_path):
-                    self.clipboard_path = file_path
-                    self.statusBar().showMessage(f"已复制: {os.path.basename(file_path)}")
+            self.copy_selected_items()
         elif event.key() == Qt.Key_V and event.modifiers() & Qt.ControlModifier:
-            target = self.current_folder
-            selected_index = self.file_tree.currentIndex()
-            if selected_index.isValid():
-                file_path = self.file_model.filePath(selected_index)
-                if os.path.exists(file_path):
-                    file_info = self.file_model.fileInfo(selected_index)
-                    target = file_path if file_info.isDir() else os.path.dirname(file_path)
-            if target and os.path.exists(target):
-                self.paste_copy(target)
+            self.paste_to_selected_target()
         elif event.key() == Qt.Key_Delete:
-            selected_index = self.file_tree.currentIndex()
-            if selected_index.isValid():
-                file_path = self.file_model.filePath(selected_index)
-                if os.path.exists(file_path):
-                    self.move_to_recycle(file_path)
+            selected_paths = self._get_selected_file_paths()
+            if len(selected_paths) > 1:
+                self._move_paths_to_recycle(selected_paths)
+            else:
+                selected_path = self._get_primary_selected_file_path()
+                if selected_path:
+                    self.move_to_recycle(selected_path)
         else:
             super().keyPressEvent(event)
 
 if __name__ == '__main__':
     try:
         app = QApplication(sys.argv)
-        
+
+        # 设置全局界面字体：优先使用系统中可用的清晰字体
+        apply_app_font(app)
+
         # 创建启动画面（使用预渲染缓存）
         splash = QSplashScreen(get_splash_pixmap())
         splash.setStyleSheet("""
