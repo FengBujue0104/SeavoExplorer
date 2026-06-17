@@ -6,6 +6,7 @@ run/
 *.spec.bak
 build_log.txt
 favicon.ico.bak
+favicon_src.png.bak
 SeavoExplorer.spec
 
 # PyInstaller

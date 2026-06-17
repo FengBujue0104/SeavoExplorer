@@ -5,6 +5,7 @@ import json
 import traceback
 import ctypes
 import shutil
+import subprocess
 from collections import namedtuple
 
 # 尝试导入OpenCV用于视频缩略图生成
@@ -1114,6 +1115,8 @@ class WizardDialog(QDialog):
             <li>压缩包（.zip/.rar/.7z）以树状结构显示内容</li>
             </ul>
             <p><b>双击</b>文件用系统默认程序打开；切换到<b>元数据</b>标签可查看文件详情。</p>
+            <p>对文件夹右键可选择<b>“在终端中打开”</b>，程序会优先尝试 Windows Terminal，
+            再回退到 PowerShell / cmd。</p>
             '''
         ),
         (
@@ -1130,8 +1133,13 @@ class WizardDialog(QDialog):
             '''
         ),
         (
-            '四、新建项目与版本结构',
+            '四、快捷访问与项目结构',
             '''
+            <p>快捷访问栏位于窗口顶部，适合放常用项目根目录、资料目录或网络目录。</p>
+            <ul>
+            <li><b>+</b> 按钮 → 打开快捷访问设置</li>
+            <li><b>右键快捷访问按钮</b> → 可在终端中打开、删除该快捷访问、或进入快捷访问设置</li>
+            </ul>
             <p>左侧 <b>“新建项目文件夹”</b>：按规则创建新的 S/M 项目根目录。</p>
             <p>选中项目后的 <b>“新建文件夹内部结构”</b>：在项目内创建版本目录（如 <code>V01</code>）
             及 BOM / SCH / 物料 / 评审 / 信号测试 等标准子文件夹。</p>
@@ -1273,7 +1281,12 @@ class MainWindow(QMainWindow):
         self.quick_access_toolbar.setFixedHeight(28)
         quick_access_label = QLabel('快捷访问:')
         quick_access_layout.addWidget(quick_access_label)
-        
+        self.quick_access_add_btn = QPushButton('+')
+        self.quick_access_add_btn.setFixedSize(22, 22)
+        self.quick_access_add_btn.setToolTip('打开快捷访问设置')
+        self.quick_access_add_btn.clicked.connect(self.show_quick_access_settings_dialog)
+        quick_access_layout.addWidget(self.quick_access_add_btn)
+
         self.quick_access_buttons = []
         self._create_quick_access_buttons(quick_access_layout)
         quick_access_layout.addStretch()
@@ -1649,20 +1662,30 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '成功', '7-Zip路径设置已保存')
     
     def _create_quick_access_buttons(self, layout):
-        for btn in self.quick_access_buttons:
+        for btn in list(self.quick_access_buttons):
+            layout.removeWidget(btn)
             btn.deleteLater()
         self.quick_access_buttons.clear()
-        
+
+        insert_index = layout.indexOf(self.quick_access_add_btn) + 1
+        if insert_index <= 0:
+            insert_index = layout.count()
+
         for item in self.quick_access_paths:
             if len(item) == 3:
                 name, path, no_preview = item
             else:
                 name, path = item
                 no_preview = False
+            item_data = (name, path, no_preview)
             btn = QPushButton(name)
             btn.setToolTip(path)
             btn.setFixedHeight(22)
             btn.setMinimumWidth(btn.fontMetrics().width('000000') + 16)
+            btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, b=btn, data=item_data: self._show_quick_access_context_menu(b, data, pos)
+            )
             if no_preview:
                 btn.setStyleSheet(
                     "QPushButton { background-color: #e8e8e8; border: 1px solid #bbb; border-radius: 3px; "
@@ -1672,9 +1695,34 @@ class MainWindow(QMainWindow):
                 btn.clicked.connect(lambda checked, p=path: self._open_quick_access_external(p))
             else:
                 btn.clicked.connect(lambda checked, p=path: self._open_quick_access_path(p))
-            layout.addWidget(btn)
+            layout.insertWidget(insert_index, btn)
+            insert_index += 1
             self.quick_access_buttons.append(btn)
-    
+
+    def _show_quick_access_context_menu(self, button, item_data, pos):
+        """快捷访问按钮右键菜单。"""
+        name, path, no_preview = item_data
+        menu = QMenu(self)
+        terminal_action = menu.addAction('在终端中打开')
+        delete_action = menu.addAction('删除快捷访问')
+        menu.addSeparator()
+        settings_action = menu.addAction('打开快捷访问设置')
+        chosen = menu.exec_(button.mapToGlobal(pos))
+        if chosen == terminal_action:
+            self.open_folder_in_terminal(path)
+        elif chosen == delete_action:
+            reply = QMessageBox.question(
+                self,
+                '确认删除',
+                f'确定要删除快捷访问“{name}”吗？\n{path}',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._remove_quick_access_item(item_data)
+        elif chosen == settings_action:
+            self.show_quick_access_settings_dialog()
+
     def _open_quick_access_external(self, path):
         try:
             path = os.path.normpath(path)
@@ -1906,6 +1954,48 @@ class MainWindow(QMainWindow):
         btn.clicked.connect(self.open_recycle_bin)
         return btn
     
+    def _remove_quick_access_item(self, item_data):
+        """删除一个快捷访问项，按名称、路径和预览模式精确匹配。"""
+        target_name, target_path, target_no_preview = item_data
+        target_path = os.path.normcase(os.path.normpath(target_path))
+        kept_paths = []
+        removed = False
+        for item in self.quick_access_paths:
+            if len(item) == 3:
+                name, path, no_preview = item
+            else:
+                name, path = item
+                no_preview = False
+            item_path = os.path.normcase(os.path.normpath(path))
+            if (
+                not removed
+                and name == target_name
+                and item_path == target_path
+                and bool(no_preview) == bool(target_no_preview)
+            ):
+                removed = True
+                continue
+            kept_paths.append(item)
+
+        if not removed:
+            QMessageBox.warning(self, '警告', '未找到该快捷访问项')
+            return False
+
+        self.quick_access_paths = kept_paths
+        self.save_settings_to_file(self.settings, self.include_subfolders)
+        self._refresh_quick_access_toolbar()
+        self.statusBar().showMessage('已删除快捷访问')
+        return True
+
+    def _refresh_quick_access_toolbar(self):
+        """刷新快捷访问工具栏，保留标题、加号和分隔空间。"""
+        quick_access_layout = self.quick_access_toolbar.layout()
+        for btn in list(self.quick_access_buttons):
+            quick_access_layout.removeWidget(btn)
+            btn.deleteLater()
+        self.quick_access_buttons.clear()
+        self._create_quick_access_buttons(quick_access_layout)
+
     def show_quick_access_settings_dialog(self):
         """显示快捷访问设置对话框"""
         dialog = QuickAccessSettingsDialog(self.quick_access_paths, self)
@@ -1915,15 +2005,7 @@ class MainWindow(QMainWindow):
             # 保存设置
             self.save_settings_to_file(self.settings, self.include_subfolders)
             # 更新工具栏
-            quick_access_layout = self.quick_access_toolbar.layout()
-            # 移除旧按钮
-            while quick_access_layout.count() > 1:
-                item = quick_access_layout.takeAt(1)
-                if item.widget() and item.widget() != self.quick_access_toolbar:
-                    item.widget().deleteLater()
-            # 重新创建按钮
-            self.quick_access_buttons.clear()
-            self._create_quick_access_buttons(quick_access_layout)
+            self._refresh_quick_access_toolbar()
             QMessageBox.information(self, '成功', '快捷访问设置已保存')
     
     def open_recycle_bin(self):
@@ -2056,6 +2138,8 @@ class MainWindow(QMainWindow):
             pin_action = menu.addAction('取消置顶')
         else:
             pin_action = menu.addAction('置顶')
+        terminal_action = menu.addAction('在终端中打开')
+        menu.addSeparator()
         hide_action = menu.addAction('隐藏项目')
         action_pos = table.viewport().mapToGlobal(pos)
         chosen = menu.exec_(action_pos)
@@ -2066,6 +2150,8 @@ class MainWindow(QMainWindow):
                 self.pinned_folders.append(folder_path)
             self._apply_pin_order(table)
             self.save_settings_to_file(self.settings, self.include_subfolders)
+        elif chosen == terminal_action:
+            self.open_folder_in_terminal(folder_path)
         elif chosen == hide_action:
             if folder_path not in self.hidden_folders:
                 self.hidden_folders.append(folder_path)
@@ -2227,12 +2313,15 @@ class MainWindow(QMainWindow):
 
             paste_copy_action = None
             rename_action = None
+            terminal_action = None
             extract_action = None
             recycle_action = None
 
             if not multi_selected:
                 paste_copy_action = menu.addAction('粘贴副本')
                 rename_action = menu.addAction('重命名')
+                if os.path.isdir(file_path):
+                    terminal_action = menu.addAction('在终端中打开')
                 menu.addSeparator()
                 if is_archive:
                     extract_action = menu.addAction('智能解压')
@@ -2256,6 +2345,8 @@ class MainWindow(QMainWindow):
                 self.paste_copy(file_path)
             elif not multi_selected and action == rename_action:
                 self.rename_item(file_path)
+            elif not multi_selected and terminal_action and action == terminal_action:
+                self.open_folder_in_terminal(file_path)
             elif not multi_selected and extract_action and action == extract_action:
                 self.smart_extract(file_path)
             elif action == recycle_action:
@@ -2644,6 +2735,58 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "错误", f"无法打开：{os.path.basename(path)}\n{str(e)}")
 
+    def _terminal_launch_candidates(self, folder_path):
+        """按优先级生成终端启动命令：Windows Terminal → PowerShell → cmd。"""
+        return [
+            ('Windows 终端', 'wt.exe', ['wt.exe', '-d', folder_path]),
+            ('PowerShell', 'powershell.exe', [
+                'powershell.exe', '-NoExit', '-ExecutionPolicy', 'Bypass',
+                '-Command', f'Set-Location -LiteralPath {folder_path!r}'
+            ]),
+            ('命令提示符', 'cmd.exe', ['cmd.exe', '/K', 'cd', '/d', folder_path]),
+        ]
+
+    def _shell_execute_terminal(self, command, as_admin):
+        """通过 ShellExecuteW 启动终端；as_admin=True 时请求 UAC 提权。"""
+        executable = command[0]
+        params = subprocess.list2cmdline(command[1:])
+        verb = 'runas' if as_admin else 'open'
+        result = ctypes.windll.shell32.ShellExecuteW(None, verb, executable, params, None, 1)
+        if result <= 32:
+            raise OSError(f'ShellExecuteW 返回错误码 {result}')
+
+    def open_folder_in_terminal(self, folder_path):
+        """在指定文件夹打开终端，优先管理员身份，失败后回退普通用户身份。"""
+        folder_path = os.path.normpath(folder_path)
+        if not os.path.isdir(folder_path):
+            QMessageBox.warning(self, '警告', f'文件夹不存在：{folder_path}')
+            return False
+
+        last_error = None
+        for terminal_name, _exe_name, command in self._terminal_launch_candidates(folder_path):
+            admin_error = None
+            try:
+                self._shell_execute_terminal(command, as_admin=True)
+                self.statusBar().showMessage(f'已以管理员身份在终端中打开: {folder_path}')
+                return True
+            except Exception as e:
+                admin_error = e
+                last_error = e
+
+            try:
+                self._shell_execute_terminal(command, as_admin=False)
+                self.statusBar().showMessage(f'已在{terminal_name}中打开: {folder_path}')
+                return True
+            except Exception as e:
+                last_error = e
+                if _exe_name.lower() == 'wt.exe':
+                    continue
+                if admin_error:
+                    break
+
+        QMessageBox.warning(self, '错误', f'无法在终端中打开文件夹：{folder_path}\n{last_error}')
+        return False
+
     def on_file_double_clicked(self, index):
         """双击文件树项：直接打开文件或展开目录；双击空白区域打开当前文件夹"""
         if not index.isValid():
@@ -3019,7 +3162,11 @@ class MainWindow(QMainWindow):
             return f'{size / (1024 * 1024 * 1024):.2f} GB'
     
     def show_about(self):
-        about_text = 'SeavoExplorer - 主板项目文件浏览器\n\n版本 0.2'
+        about_text = (
+            'SeavoExplorer - 主板项目文件浏览器\n\n'
+            '版本 0.2.1\n\n'
+            '本版本新增快捷访问右键管理、文件夹终端打开，并完善使用帮助与新手向导。'
+        )
         # 关于页 logo 优先用高清 PNG 源（清晰放大），回退到多尺寸 ico
         png_path = self._resource_path('favicon_src.png')
         ico_path = self._resource_path('favicon.ico')
@@ -3057,7 +3204,7 @@ class MainWindow(QMainWindow):
         help_text.setReadOnly(True)
         help_text.setHtml('''
 <h2 style="color: #2c3e50;">SeavoExplorer 使用帮助</h2>
-<p style="color: #7f8c8d;">主板/子卡项目文件浏览器 —— 快速定位项目、预览工程文档、整理版本目录。
+<p style="color: #7f8c8d;">主板/子卡项目文件浏览器 —— 快速定位项目、预览工程文档、整理版本目录。当前版本：<b>0.2.1</b>。
 首次使用建议先看 <b>帮助 → 新手向导</b>，再按本页完成路径、预览和压缩相关设置。</p>
 
 <h3 style="color: #2980b9;">一、首次使用流程</h3>
@@ -3084,7 +3231,7 @@ class MainWindow(QMainWindow):
 <li><b>单击</b>项目行：在右侧文件树中显示该项目的文件</li>
 <li><b>双击编号列</b>：在系统资源管理器中打开该项目文件夹</li>
 <li><b>双击注释列</b>：编辑项目注释，注释会自动保存到 <code>seavo_comments.json</code></li>
-<li><b>右键项目行</b>：置顶 / 取消置顶，置顶项会加粗并排在列表前部</li>
+<li><b>右键项目行</b>：置顶 / 取消置顶、在终端中打开、隐藏项目；置顶项会加粗并排在列表前部</li>
 <li><b>隐藏项目</b>：不常用或已归档项目可隐藏；如需找回，请使用 <b>设置 → 恢复已隐藏项目</b></li>
 <li><b>文件夹搜索框</b>：输入编号、注释或路径关键词实时过滤项目列表</li>
 </ul>
@@ -3111,6 +3258,7 @@ class MainWindow(QMainWindow):
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
+<li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并优先尝试管理员身份</li>
 </ul>
 <p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>添加到zip压缩包</b>、<b>移入回收站</b>。</p>
 <p>在<b>空白处</b>右键：仅显示<b>粘贴副本</b>，粘贴到当前项目文件夹。</p>
@@ -3167,6 +3315,8 @@ class MainWindow(QMainWindow):
 <ul>
 <li><b>普通按钮</b>（默认样式）：点击后在文件树中显示该文件夹内容</li>
 <li><b>不显示预览按钮</b>（灰色斜体）：点击后直接在资源管理器中打开</li>
+<li><b>+</b> 按钮：位于“快捷访问”标题右侧，点击可打开快捷访问设置</li>
+<li><b>右键快捷访问按钮</b>：可在终端中打开该目录、删除该快捷访问（需二次确认）、或打开快捷访问设置</li>
 </ul>
 <p>菜单 <b>设置 → 快捷访问设置</b> 可添加、删除、排序快捷项，并为每项设置名称、路径和是否不显示预览。</p>
 <p style="color: #7f8c8d;">提示：磁盘根目录、网络文件夹等大目录建议设为“不显示预览”，避免文件树加载缓慢。</p>
