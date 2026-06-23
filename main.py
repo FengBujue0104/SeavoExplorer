@@ -1437,6 +1437,7 @@ class MainWindow(QMainWindow):
     def initUI(self):
         self.setWindowTitle('主板项目文件浏览器')
         self.setGeometry(100, 100, 1400, 900)
+        self._restore_window_geometry()
         
         icon_path = self._resource_path('favicon.ico')
         if os.path.exists(icon_path):
@@ -1592,17 +1593,50 @@ class MainWindow(QMainWindow):
         right_layout.setStretch(0, 2)
         right_layout.setStretch(1, 1)
         
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(1, 3)
-        content_layout.addWidget(splitter)
-        
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(left_panel)
+        self.splitter.addWidget(right_widget)
+        self.splitter.setStretchFactor(1, 3)
+        content_layout.addWidget(self.splitter)
+
         # 在状态栏右侧添加回收站按钮
         self.statusBar().addPermanentWidget(self._create_recycle_btn())
-        
+
         self.create_menu()
+        # 控件全部建好后再恢复分栏位置，否则 setSizes 会被后续布局覆盖
+        self._restore_splitter_sizes()
     
+    def _restore_window_geometry(self):
+        """用持久化的窗口几何覆盖默认值；值缺失或非法（非四元、含非正宽高、完全在屏幕外）则保持默认，不抛错。"""
+        geo = getattr(self, 'window_geometry', None)
+        try:
+            if not (isinstance(geo, (list, tuple)) and len(geo) == 4):
+                return
+            x, y, w, h = (int(v) for v in geo)
+            if w <= 0 or h <= 0:
+                return
+            # 屏幕边界检查：窗口矩形与可用桌面区域必须有交集，否则会出现在不可见处
+            desktop = QApplication.desktop()
+            screen_rect = desktop.availableGeometry(QRect(x, y, w, h).center())
+            if not screen_rect.intersects(QRect(x, y, w, h)):
+                return
+            self.setGeometry(x, y, w, h)
+        except (TypeError, ValueError):
+            return
+
+    def _restore_splitter_sizes(self):
+        """用持久化的分栏尺寸恢复主分栏；值缺失或非法则保持默认，不抛错。"""
+        sizes = getattr(self, 'splitter_sizes', None)
+        try:
+            if not (isinstance(sizes, (list, tuple)) and len(sizes) == 2):
+                return
+            sizes = [int(v) for v in sizes]
+            if any(v < 0 for v in sizes) or sum(sizes) <= 0:
+                return
+            self.splitter.setSizes(sizes)
+        except (TypeError, ValueError):
+            return
+
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('文件')
@@ -1640,6 +1674,9 @@ class MainWindow(QMainWindow):
         # 各类文件预览开关：关闭后点击对应文件不自动读取，改为显示「显示预览」按钮，降低卡顿
         for key, _name in PREVIEW_CATEGORIES:
             setattr(self, f'preview_{key}_enabled', True)
+        # 窗口几何与主分栏位置（None 表示用内置默认，由 _restore_* 校验后恢复）
+        self.window_geometry = None
+        self.splitter_sizes = None
 
     def _get_default_quick_access_paths(self):
         """获取默认快捷访问路径"""
@@ -1718,6 +1755,10 @@ class MainWindow(QMainWindow):
                 cfg_key = f'preview_{key}_enabled'
                 if cfg_key in config_data:
                     setattr(self, cfg_key, config_data[cfg_key])
+            if 'window_geometry' in config_data:
+                self.window_geometry = config_data['window_geometry']
+            if 'splitter_sizes' in config_data:
+                self.splitter_sizes = config_data['splitter_sizes']
         except Exception:
             self._init_default_settings()
         return self.project_paths
@@ -1776,6 +1817,8 @@ class MainWindow(QMainWindow):
             for key, _name in PREVIEW_CATEGORIES:
                 cfg_key = f'preview_{key}_enabled'
                 config_data[cfg_key] = getattr(self, cfg_key, True)
+            config_data['window_geometry'] = getattr(self, 'window_geometry', None)
+            config_data['splitter_sizes'] = getattr(self, 'splitter_sizes', None)
             if hasattr(self, 'folder_structure'):
                 config_data['folder_structure'] = self.folder_structure
             if default_new_project_folder:
@@ -2291,6 +2334,15 @@ class MainWindow(QMainWindow):
             thread.requestInterruption()
             thread.quit()
             thread.wait(3000)
+        # 记住窗口几何与主分栏位置，保存失败绝不阻塞关闭
+        try:
+            geo = self.geometry()
+            self.window_geometry = [geo.x(), geo.y(), geo.width(), geo.height()]
+            if hasattr(self, 'splitter'):
+                self.splitter_sizes = list(self.splitter.sizes())
+            self.save_settings_to_file(self.settings, self.include_subfolders)
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def on_scan_progress(self, message):
