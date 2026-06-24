@@ -1529,7 +1529,13 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(button_layout)
         
         right_layout = QVBoxLayout()
-        
+
+        # 面包屑路径栏（置于文件树上方，跟随选中项，从项目根开始）
+        self._breadcrumb_path = None
+        self._breadcrumb_buttons = []
+        self.breadcrumb_bar = self._build_breadcrumb_bar()
+        right_layout.addWidget(self.breadcrumb_bar)
+
         self.file_tree = QTreeView()
         self.file_model = QFileSystemModel()
         self.file_model.setFilter(QDir.NoDotAndDotDot | QDir.AllEntries)
@@ -2039,6 +2045,9 @@ class MainWindow(QMainWindow):
             self.file_tree.setRootIndex(self.file_model.index(path))
             self.new_structure_btn.setEnabled(False)
             self._update_folder_status_bar()
+            # 面包屑焦点回到快捷访问根
+            self._breadcrumb_path = path
+            self._rebuild_breadcrumb()
         else:
             QMessageBox.warning(self, '警告', f'路径不存在: {path}')
 
@@ -2530,6 +2539,9 @@ class MainWindow(QMainWindow):
                 self._reset_preview()
                 self.metadata_tab.clear()
                 self.new_structure_btn.setEnabled(False)
+                # 清空面包屑
+                self._breadcrumb_path = None
+                self._rebuild_breadcrumb()
             # 同步清空「上次项目」记录，避免下次恢复指向已隐藏/删除的项目
             if getattr(self, 'last_project_path', None) == folder_path:
                 self.last_project_path = None
@@ -2598,6 +2610,114 @@ class MainWindow(QMainWindow):
                 table.item(row, 0).setFont(font)
                 table.item(row, 1).setFont(font)
 
+    def _build_breadcrumb_bar(self):
+        """构建面包屑容器（横向布局，单行，末尾留弹性空间）。段在 _rebuild_breadcrumb 里动态填充。"""
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(2)
+        layout.addStretch()  # 占位，段插在它前面
+        bar.setFixedHeight(26)
+        self._breadcrumb_layout = layout
+        return bar
+
+    def _clear_breadcrumb(self):
+        """移除所有已建的段控件（按钮 + 分隔符），保留末尾的 stretch。"""
+        for w in self._breadcrumb_buttons:
+            self._breadcrumb_layout.removeWidget(w)
+            w.deleteLater()
+        self._breadcrumb_buttons = []
+
+    def _rebuild_breadcrumb(self):
+        """按 current_folder（根）+ _breadcrumb_path（焦点）重绘面包屑。
+        段：[根 basename, rel 各级]；中间段可点，末段不可点。超长则中间省略。"""
+        self._clear_breadcrumb()
+        root = getattr(self, 'current_folder', None)
+        if not root:
+            return
+        focus = self._breadcrumb_path or root
+        try:
+            rel = os.path.relpath(focus, root)
+        except (ValueError, TypeError):
+            rel = '.'
+        # focus 不在 root 之下：退化为只显示根
+        if rel == '.' or rel.startswith('..'):
+            parts = []
+        else:
+            parts = [p for p in rel.split(os.sep) if p and p != '.']
+        # 段路径列表：根 + 逐级
+        seg_paths = [root]
+        acc = root
+        for p in parts:
+            acc = os.path.join(acc, p)
+            seg_paths.append(acc)
+        seg_names = [os.path.basename(root) or root] + parts
+
+        # 超长省略：保留首段 + 末两段，中间塞不可点的 …
+        MAX_SEGS = 5
+        ellipsis_at = None
+        if len(seg_names) > MAX_SEGS:
+            keep_head, keep_tail = 1, 2
+            ellipsis_at = keep_head
+            seg_names = seg_names[:keep_head] + ['…'] + seg_names[-keep_tail:]
+            seg_paths = seg_paths[:keep_head] + [None] + seg_paths[-keep_tail:]
+
+        insert_at = self._breadcrumb_layout.count() - 1  # stretch 之前
+        last_idx = len(seg_names) - 1
+        for i, (name, path) in enumerate(zip(seg_names, seg_paths)):
+            if i > 0:
+                sep = QLabel('›')
+                sep.setStyleSheet('color: #999;')
+                self._breadcrumb_layout.insertWidget(insert_at, sep)
+                insert_at += 1
+                self._breadcrumb_buttons.append(sep)
+            is_last = (i == last_idx)
+            is_ellipsis = (path is None)
+            if is_last or is_ellipsis:
+                lbl = QLabel(name)
+                if is_last:
+                    lbl.setStyleSheet('font-weight: bold; color: #2c3e50; padding: 0 4px;')
+                else:
+                    lbl.setStyleSheet('color: #999; padding: 0 2px;')
+                self._breadcrumb_layout.insertWidget(insert_at, lbl)
+                insert_at += 1
+                self._breadcrumb_buttons.append(lbl)
+            else:
+                btn = QToolButton()
+                btn.setText(name)
+                btn.setAutoRaise(True)
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setStyleSheet(
+                    'QToolButton { border: none; color: #2575c0; padding: 0 4px; }'
+                    'QToolButton:hover { color: #1a4d80; text-decoration: underline; }'
+                )
+                btn.clicked.connect(lambda checked, p=path: self._on_breadcrumb_clicked(p))
+                self._breadcrumb_layout.insertWidget(insert_at, btn)
+                insert_at += 1
+                self._breadcrumb_buttons.append(btn)
+
+    def _on_breadcrumb_clicked(self, path):
+        """点击中间段：在文件树里选中并滚动到该目录，不改树根。"""
+        root = getattr(self, 'current_folder', None)
+        if not (root and path and os.path.isdir(path)):
+            self._rebuild_breadcrumb()  # 路径已失效，按当前状态重绘
+            return
+        # 必须在 root 之下
+        try:
+            rel = os.path.relpath(path, root)
+        except (ValueError, TypeError):
+            return
+        if rel.startswith('..'):
+            return
+        idx = self.file_model.index(path)
+        if idx.isValid():
+            self.file_tree.setCurrentIndex(idx)
+            self.file_tree.scrollTo(idx)
+            self.file_tree.expand(idx)
+        self._reset_preview()
+        self._breadcrumb_path = path
+        self._rebuild_breadcrumb()
+
     def _select_project_path(self, folder_path):
         """把某个项目路径设为当前：刷新右侧 file_tree、清预览、启用「新建结构」按钮、更新状态栏。
         供点击项目行与启动恢复共用，避免两份同步漂移。路径不存在则静默跳过。"""
@@ -2610,6 +2730,9 @@ class MainWindow(QMainWindow):
         self.metadata_tab.clear()
         self.new_structure_btn.setEnabled(True)
         self._update_folder_status_bar()
+        # 面包屑焦点回到项目根
+        self._breadcrumb_path = folder_path
+        self._rebuild_breadcrumb()
 
     def on_folder_cell_clicked(self, row, column):
         table = self.sender()
@@ -2664,6 +2787,10 @@ class MainWindow(QMainWindow):
         else:
             self._reset_preview()
             self.metadata_tab.clear()
+        # 面包屑跟随：文件取其所在目录，目录取自身
+        focus = os.path.dirname(file_path) if file_info.isFile() else file_path
+        self._breadcrumb_path = focus
+        self._rebuild_breadcrumb()
     
     def on_file_tree_context_menu(self, position):
         """文件树右键菜单"""
@@ -2854,6 +2981,9 @@ class MainWindow(QMainWindow):
                 self.file_model.setRootPath(new_path)
                 self.file_tree.setRootIndex(self.file_model.index(new_path))
                 self._update_folder_status_bar()
+                # 面包屑焦点回到新的项目根
+                self._breadcrumb_path = new_path
+                self._rebuild_breadcrumb()
             # 同步更新「上次项目」记录，避免下次启动恢复指向旧名字
             if getattr(self, 'last_project_path', None) == file_path:
                 self.last_project_path = new_path
