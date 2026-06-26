@@ -31,7 +31,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTreeView, QTextEdit,
                                 QHeaderView, QFormLayout,
                                 QRadioButton, QButtonGroup, QInputDialog, QSplashScreen,
                                 QToolBar, QToolButton, QSizePolicy, QProgressDialog,
-                                QCheckBox)
+                                QCheckBox, QComboBox, QListWidget, QListWidgetItem)
 from PyQt5.QtCore import QDir, Qt, QModelIndex, QThread, pyqtSignal, QRect, QUrl, QMimeData, QTimer, QEvent
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, QKeySequence, QFontDatabase
 
@@ -595,6 +595,56 @@ class FolderStatsThread(QThread):
             pass
         if not self.isInterruptionRequested():
             self.stats_ready.emit(self.token, count, total, truncated)
+
+
+class FileSearchThread(QThread):
+    """在某个文件夹下递归搜索文件：按文件名 + 扩展名 + 修改时间过滤（off UI 线程）。"""
+    search_ready = pyqtSignal(int, list, bool)  # (token, results, truncated)
+
+    MAX_RESULTS = 2000  # 软上限：超过即停，UI 提示
+
+    def __init__(self, root, token, name_filter, exts, mtime_after):
+        super().__init__()
+        self.root = root
+        self.token = token
+        self.name_filter = (name_filter or '').lower()
+        self.exts = exts            # None 或一组扩展名小写（含点）
+        self.mtime_after = mtime_after  # None 或时间戳下限（含）
+
+    def run(self):
+        results = []
+        truncated = False
+        try:
+            for dirpath, dirnames, filenames in os.walk(self.root):
+                if self.isInterruptionRequested():
+                    return
+                for name in filenames:
+                    if self.isInterruptionRequested():
+                        return
+                    ext = os.path.splitext(name)[1].lower()
+                    if self.exts is not None and ext not in self.exts:
+                        continue
+                    if self.name_filter and self.name_filter not in name.lower():
+                        continue
+                    full = os.path.join(dirpath, name)
+                    try:
+                        st_mtime = os.path.getmtime(full)
+                        size = os.path.getsize(full)
+                    except OSError:
+                        continue  # 权限/失联/已删除：跳过
+                    if self.mtime_after is not None and st_mtime < self.mtime_after:
+                        continue
+                    rel = os.path.relpath(full, self.root)
+                    results.append((name, rel, full, size, st_mtime))
+                    if len(results) >= self.MAX_RESULTS:
+                        truncated = True
+                        break
+                if truncated:
+                    break
+        except Exception:
+            pass
+        if not self.isInterruptionRequested():
+            self.search_ready.emit(self.token, results, truncated)
 
 
 class NewProjectDialog(QDialog):
@@ -1576,6 +1626,9 @@ class MainWindow(QMainWindow):
         self.breadcrumb_bar = self._build_breadcrumb_bar()
         right_layout.addWidget(self.breadcrumb_bar)
 
+        # 文件搜索条（独立于左侧文件夹搜索，仅搜当前项目内文件）
+        self._build_search_bar(right_layout)
+
         self.file_tree = QTreeView()
         self.file_model = QFileSystemModel()
         self.file_model.setFilter(QDir.NoDotAndDotDot | QDir.AllEntries)
@@ -1636,10 +1689,24 @@ class MainWindow(QMainWindow):
         # 右侧面板（文件树+预览）
         right_widget = QWidget()
         right_widget.setLayout(right_layout)
-        right_layout.addWidget(self.file_tree)
+
+        # 文件树与搜索结果面板共享同一区段（搜索时互斥显隐）
+        self.file_area = QWidget()
+        file_area_layout = QVBoxLayout(self.file_area)
+        file_area_layout.setContentsMargins(0, 0, 0, 0)
+        file_area_layout.setSpacing(0)
+        file_area_layout.addWidget(self.file_tree)
+        # 结果面板（默认隐藏，命中时替换 file_tree 显隐）
+        self.search_results_panel = self._build_search_results_panel()
+        file_area_layout.addWidget(self.search_results_panel)
+        self.search_results_panel.hide()
+        self._search_thread = None
+        self._search_token = 0
+
+        right_layout.addWidget(self.file_area)
         right_layout.addWidget(self.tabs)
-        right_layout.setStretch(0, 2)
-        right_layout.setStretch(1, 1)
+        right_layout.setStretch(1, 2)
+        right_layout.setStretch(2, 1)
         
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(left_panel)
@@ -2094,6 +2161,8 @@ class MainWindow(QMainWindow):
             # 面包屑焦点回到快捷访问根
             self._breadcrumb_path = path
             self._rebuild_breadcrumb()
+            self._close_search_results()
+            self._set_search_bar_enabled(True)
         else:
             QMessageBox.warning(self, '警告', f'路径不存在: {path}')
 
@@ -2415,6 +2484,11 @@ class MainWindow(QMainWindow):
             stats_thread.requestInterruption()
             stats_thread.quit()
             stats_thread.wait(2000)
+        search_thread = getattr(self, '_search_thread', None)
+        if search_thread is not None and search_thread.isRunning():
+            search_thread.requestInterruption()
+            search_thread.quit()
+            search_thread.wait(2000)
         # 记住窗口几何/最大化标志/主分栏位置，保存失败绝不阻塞关闭
         try:
             # normalGeometry() 返回非最大化时的几何；若窗口从未被最大化过，某些平台返回 0 尺寸 → 回退到 geometry()
@@ -2593,6 +2667,8 @@ class MainWindow(QMainWindow):
                 # 清空面包屑
                 self._breadcrumb_path = None
                 self._rebuild_breadcrumb()
+                # 关闭文件搜索结果面板 + 禁用搜索条
+                self._set_search_bar_enabled(False)
                 # 清空文件统计 + 取消在跑的统计线程
                 self._stats_token += 1
                 self.folder_stats_label.setText('')
@@ -2776,6 +2852,193 @@ class MainWindow(QMainWindow):
         self._breadcrumb_path = path
         self._rebuild_breadcrumb()
 
+    # ---- 文件搜索（文件名 + 类型 + 日期）----
+
+    # 类型下拉：显示名 -> 扩展名集合（None 表示不限）
+    _SEARCH_TYPE_EXTS = None  # 占位，运行时如下表
+    _TYPE_OPTIONS = None
+
+    def _init_search_type_options(self):
+        if self.__class__._TYPE_OPTIONS is not None:
+            return
+        opts = [  # (显示名, 扩展名集合或None)
+            ('全部', None),
+            ('文本', TEXT_EXTS + ('.bom', '.drc', '.rep', '.rpt')),
+            ('PDF', ('.pdf',)),
+            ('图片', IMAGE_EXTS),
+            ('视频', VIDEO_EXTS),
+            ('压缩包', ARCHIVE_EXTS),
+            ('表格', ('.xlsx', '.xlsm', '.xls')),
+            ('文档', ('.docx', '.doc')),
+        ]
+        self.__class__._TYPE_OPTIONS = opts
+
+    def _build_search_bar(self, parent_layout):
+        """构建文件搜索条：关键词 + 类型下拉 + 日期下拉 + 搜索/关闭按钮。"""
+        self._init_search_type_options()
+        bar = QWidget()
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(4, 2, 4, 2)
+        h.setSpacing(4)
+        h.addWidget(QLabel('文件搜索:'))
+        self.search_name_edit = QLineEdit()
+        self.search_name_edit.setPlaceholderText('文件名关键词（留空=不限）')
+        self.search_name_edit.returnPressed.connect(self._start_file_search)
+        h.addWidget(self.search_name_edit, 1)
+        self.search_type_combo = QComboBox()
+        for name, _exts in self._TYPE_OPTIONS:
+            self.search_type_combo.addItem(name)
+        h.addWidget(self.search_type_combo)
+        self.search_date_combo = QComboBox()
+        for label in ('不限', '近7天', '近30天', '近半年', '近一年'):
+            self.search_date_combo.addItem(label)
+        h.addWidget(self.search_date_combo)
+        self.search_btn = QPushButton('搜索')
+        self.search_btn.clicked.connect(self._start_file_search)
+        h.addWidget(self.search_btn)
+        bar.setFixedHeight(30)
+        self.search_bar = bar
+        # 未选项目前禁用
+        for w in (self.search_name_edit, self.search_type_combo, self.search_date_combo, self.search_btn):
+            w.setEnabled(False)
+        parent_layout.addWidget(bar)
+
+    def _build_search_results_panel(self):
+        """搜索结果面板：顶部状态行 + 结果列表。默认隐藏。"""
+        panel = QWidget()
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+        head = QHBoxLayout()
+        head.setContentsMargins(4, 2, 4, 2)
+        self.search_status_label = QLabel('')
+        self.search_status_label.setStyleSheet('color: #555;')
+        head.addWidget(self.search_status_label, 1)
+        close_btn = QPushButton('关闭')
+        close_btn.clicked.connect(self._close_search_results)
+        head.addWidget(close_btn)
+        v.addLayout(head)
+        self.search_results_list = QListWidget()
+        self.search_results_list.itemDoubleClicked.connect(self._on_search_result_double_clicked)
+        v.addWidget(self.search_results_list, 1)
+        return panel
+
+    def _search_exts_for_combo(self):
+        idx = self.search_type_combo.currentIndex()
+        if idx < 0 or idx >= len(self._TYPE_OPTIONS):
+            return None
+        return self._TYPE_OPTIONS[idx][1]
+
+    def _search_mtime_after(self):
+        """返回时间戳下限或 None。now 用 self._search_now_ts（可被测试注入）。"""
+        import time as _time
+        text = self.search_date_combo.currentText()
+        if text == '不限' or not text:
+            return None
+        now = getattr(self, '_search_now_ts', None) or _time.time()
+        days = {'近7天': 7, '近30天': 30, '近半年': 182, '近一年': 365}.get(text)
+        if days is None:
+            return None
+        return now - days * 86400
+
+    def _start_file_search(self):
+        root = getattr(self, 'current_folder', None)
+        if not (root and os.path.isdir(root)):
+            return
+        self._search_token += 1
+        token = self._search_token
+        old = getattr(self, '_search_thread', None)
+        if old is not None and old.isRunning():
+            old.requestInterruption()
+            old.quit()
+        name = self.search_name_edit.text()
+        exts = self._search_exts_for_combo()
+        mtime_after = self._search_mtime_after()
+        # 切到结果面板
+        self.file_tree.hide()
+        self.search_results_panel.show()
+        self.search_results_list.clear()
+        self.search_status_label.setText('搜索中…')
+        self._search_thread = FileSearchThread(root, token, name, exts, mtime_after)
+        self._search_thread.search_ready.connect(self._on_search_ready)
+        self._search_thread.start()
+
+    def _on_search_ready(self, token, results, truncated):
+        if token != self._search_token:
+            return  # 过期，丢弃
+        self.search_results_list.clear()
+        for name, rel, full, size, mtime in results:
+            it = QListWidgetItem(f'{name}    [{rel}]    {self.format_file_size(size)}')
+            it.setData(Qt.UserRole, full)
+            self.search_results_list.addItem(it)
+        n = len(results)
+        if truncated:
+            self.search_status_label.setText(f'找到 {n}+ 项（结果过多已截断，请细化条件）')
+        elif n == 0:
+            self.search_status_label.setText('未找到匹配文件')
+        else:
+            self.search_status_label.setText(f'找到 {n} 项（双击在文件树中定位）')
+
+    def _on_search_result_double_clicked(self, item):
+        """双击结果：回到文件树并把该文件的所在目录选中定位。"""
+        full = item.data(Qt.UserRole)
+        if not full or not os.path.exists(full):
+            return
+        self._close_search_results(keep_tree_visible=True)
+        # 聚焦到文件所在目录（与点击该目录行为一致）
+        focus = full if os.path.isdir(full) else os.path.dirname(full)
+        try:
+            idx = self.file_model.index(focus)
+            if idx.isValid():
+                self.file_tree.setCurrentIndex(idx)
+                self.file_tree.scrollTo(idx)
+                # 逐级展开父链，确保深层目录可见（QFileSystemModel 懒加载）
+                self._expand_ancestors(focus)
+        except Exception:
+            pass
+        self._breadcrumb_path = focus
+        self._rebuild_breadcrumb()
+        # 选中文件本身（若点的是文件），在树里高亮
+        try:
+            fidx = self.file_model.index(full)
+            if fidx.isValid():
+                self.file_tree.setCurrentIndex(fidx)
+                self.file_tree.scrollTo(fidx)
+        except Exception:
+            pass
+
+    def _expand_ancestors(self, path):
+        """逐级展开从 current_folder 到 path 的父链，使深层项可见。"""
+        parts = []
+        root = os.path.normpath(getattr(self, 'current_folder', '') or '')
+        cur = os.path.normpath(path)
+        while cur and cur != root and os.path.commonpath([cur, root]) == root and cur != os.path.dirname(cur):
+            parts.append(cur)
+            cur = os.path.dirname(cur)
+        for p in reversed(parts):
+            idx = self.file_model.index(p)
+            if idx.isValid():
+                self.file_tree.expand(idx)
+
+    def _close_search_results(self, keep_tree_visible=False):
+        """关闭结果面板，回显文件树。"""
+        self._search_token += 1  # 使在跑的搜索结果失效
+        t = getattr(self, '_search_thread', None)
+        if t is not None and t.isRunning():
+            t.requestInterruption()
+            t.quit()
+        self.search_results_list.clear()
+        self.search_status_label.setText('')
+        self.search_results_panel.hide()
+        if not keep_tree_visible:
+            self.file_tree.show()
+
+    def _set_search_bar_enabled(self, enabled):
+        for w in (self.search_name_edit, self.search_type_combo, self.search_date_combo, self.search_btn):
+            w.setEnabled(enabled)
+        if not enabled:
+            self._close_search_results()
+
     def _select_project_path(self, folder_path):
         """把某个项目路径设为当前：刷新右侧 file_tree、清预览、启用「新建结构」按钮、更新状态栏。
         供点击项目行与启动恢复共用，避免两份同步漂移。路径不存在则静默跳过。"""
@@ -2791,6 +3054,9 @@ class MainWindow(QMainWindow):
         # 面包屑焦点回到项目根
         self._breadcrumb_path = folder_path
         self._rebuild_breadcrumb()
+        # 切了项目：清空旧搜索结果，启用文件搜索条
+        self._close_search_results()
+        self._set_search_bar_enabled(True)
 
     def on_folder_cell_clicked(self, row, column):
         table = self.sender()
