@@ -2967,9 +2967,27 @@ class MainWindow(QMainWindow):
         if token != self._search_token:
             return  # 过期，丢弃
         self.search_results_list.clear()
+        # 按所在目录分组、排序（目录升序 -> 文件名升序），避免杂乱
+        root = getattr(self, 'current_folder', '') or ''
+        def dir_key(item):
+            d = os.path.dirname(item[1])
+            return (d.lower(), d)
+        results = sorted(results, key=lambda it: (dir_key(it)[0], it[0].lower()))
+        cur_group = None
         for name, rel, full, size, mtime in results:
-            it = QListWidgetItem(f'{name}    [{rel}]    {self.format_file_size(size)}')
+            dpart = os.path.dirname(rel)
+            if dpart != cur_group:
+                cur_group = dpart
+                title = dpart if dpart else os.path.basename(root) or '（项目根）'
+                grp = QListWidgetItem(f'📁  {title}')
+                grp.setFlags(Qt.NoItemFlags)  # 组标题不可选/不可双击定位
+                f = grp.font(); f.setBold(True)
+                grp.setFont(f)
+                grp.setBackground(QColor('#eef3f8'))
+                self.search_results_list.addItem(grp)
+            it = QListWidgetItem(f'    {name}    ({self.format_file_size(size)})')
             it.setData(Qt.UserRole, full)
+            it.setToolTip(full)
             self.search_results_list.addItem(it)
         n = len(results)
         if truncated:
@@ -2980,47 +2998,48 @@ class MainWindow(QMainWindow):
             self.search_status_label.setText(f'找到 {n} 项（双击在文件树中定位）')
 
     def _on_search_result_double_clicked(self, item):
-        """双击结果：回到文件树并把该文件的所在目录选中定位。"""
+        """双击结果：回显文件树，逐级展开父链并定位到该文件。"""
         full = item.data(Qt.UserRole)
         if not full or not os.path.exists(full):
             return
-        self._close_search_results(keep_tree_visible=True)
-        # 聚焦到文件所在目录（与点击该目录行为一致）
+        # 回到文件树（关闭结果面板会 show file_tree）
+        self._close_search_results()
         focus = full if os.path.isdir(full) else os.path.dirname(full)
+        # 逐级展开父链，确保深层目录可见（QFileSystemModel 懒加载需边展开边泵事件）
+        self._expand_ancestors(focus)
+        # 选中文件/目录本身并滚动到位
+        target = focus if os.path.isdir(full) else full
         try:
-            idx = self.file_model.index(focus)
+            idx = self.file_model.index(target)
             if idx.isValid():
                 self.file_tree.setCurrentIndex(idx)
-                self.file_tree.scrollTo(idx)
-                # 逐级展开父链，确保深层目录可见（QFileSystemModel 懒加载）
-                self._expand_ancestors(focus)
+                # 加载可能异步：泵几轮事件后再滚动
+                for _ in range(5):
+                    QApplication.processEvents()
+                self.file_tree.scrollTo(idx, QAbstractItemView.PositionAtCenter)
         except Exception:
             pass
         self._breadcrumb_path = focus
         self._rebuild_breadcrumb()
-        # 选中文件本身（若点的是文件），在树里高亮
-        try:
-            fidx = self.file_model.index(full)
-            if fidx.isValid():
-                self.file_tree.setCurrentIndex(fidx)
-                self.file_tree.scrollTo(fidx)
-        except Exception:
-            pass
 
     def _expand_ancestors(self, path):
-        """逐级展开从 current_folder 到 path 的父链，使深层项可见。"""
-        parts = []
+        """逐级展开从 current_folder 到 path 的父链，边展开边泵事件以触发懒加载。"""
         root = os.path.normpath(getattr(self, 'current_folder', '') or '')
         cur = os.path.normpath(path)
+        chain = []
         while cur and cur != root and os.path.commonpath([cur, root]) == root and cur != os.path.dirname(cur):
-            parts.append(cur)
+            chain.append(cur)
             cur = os.path.dirname(cur)
-        for p in reversed(parts):
-            idx = self.file_model.index(p)
-            if idx.isValid():
-                self.file_tree.expand(idx)
+        for p in reversed(chain):
+            try:
+                idx = self.file_model.index(p)
+                if idx.isValid():
+                    self.file_tree.setExpanded(idx, True)
+                    QApplication.processEvents()
+            except Exception:
+                pass
 
-    def _close_search_results(self, keep_tree_visible=False):
+    def _close_search_results(self):
         """关闭结果面板，回显文件树。"""
         self._search_token += 1  # 使在跑的搜索结果失效
         t = getattr(self, '_search_thread', None)
@@ -3030,8 +3049,7 @@ class MainWindow(QMainWindow):
         self.search_results_list.clear()
         self.search_status_label.setText('')
         self.search_results_panel.hide()
-        if not keep_tree_visible:
-            self.file_tree.show()
+        self.file_tree.show()
 
     def _set_search_bar_enabled(self, enabled):
         for w in (self.search_name_edit, self.search_type_combo, self.search_date_combo, self.search_btn):
