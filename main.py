@@ -1705,8 +1705,10 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(self.file_area)
         right_layout.addWidget(self.tabs)
-        right_layout.setStretch(1, 2)
-        right_layout.setStretch(2, 1)
+        right_layout.setStretch(0, 0)  # 面包屑（固定高度 26px，不参与拉伸）
+        right_layout.setStretch(1, 0)  # 搜索条（固定高度 30px，不参与拉伸）
+        right_layout.setStretch(2, 2)  # file_area（文件树/结果面板，主内容区）
+        right_layout.setStretch(3, 1)  # tabs（预览/元数据）
         
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(left_panel)
