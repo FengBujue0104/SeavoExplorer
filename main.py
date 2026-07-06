@@ -4982,50 +4982,12 @@ class MainWindow(QMainWindow):
             except Exception: pass
         return frames if frames else None
     
-    def generate_video_thumbnails(self, video_size=(320, 240)):
-        """在 VIDEO_PREVIEW_POSITIONS 各时间点截图,返回 QPixmap 列表(用于多帧预览)。"""
-        if not HAS_OPENCV:
-            return None
-        try:
-            frames = []
-            for pos in VIDEO_PREVIEW_POSITIONS:
-                frame = self._capture_single_frame(video_size, pos)
-                if frame is not None:
-                    frames.append(frame)
-            return frames if frames else None
-        except Exception:
-            return None
-
-    def _capture_single_frame(self, video_size, position):
-        """在视频指定百分比位置截取一帧,返回 QPixmap;失败返回 None。"""
-        video_path = getattr(self, 'current_video_path', None)
-        if not video_path:
-            return None
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return None
-        try:
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0:
-                return None
-            frame_to_capture = max(0, min(int(total_frames * position), total_frames - 1))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_to_capture)
-            ret, frame = cap.read()
-            if not ret:
-                return None
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = frame_rgb.shape
-            q_img = QImage(frame_rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
-            # 缩放单帧到接近原始比例的小图,避免拼接后过宽
-            thumb_h = 96
-            thumb_w = max(1, int(round(w * thumb_h / h)))
-            pixmap = QPixmap.fromImage(q_img).scaled(thumb_w, thumb_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            return pixmap
-        except Exception:
-            return None
-        finally:
-            try: cap.release()
-            except Exception: pass
+    def generate_video_thumbnails(self, video_path=None, thumb_h=96):
+        """在 VIDEO_PREVIEW_POSITIONS 各时间点截图,返回等比缩放后的 QPixmap 列表。
+        可传入 video_path,否则使用 self.current_video_path。"""
+        if video_path is None:
+            video_path = getattr(self, 'current_video_path', None)
+        return self._capture_video_frames(video_path, target_height=thumb_h)
 
     def generate_video_thumbnail(self, video_path, size=(320, 240)):
         """保留:单个视频缩略图(中点帧),向后兼容。"""
