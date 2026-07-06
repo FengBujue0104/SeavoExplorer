@@ -2490,16 +2490,22 @@ class MainWindow(QMainWindow):
             thread.requestInterruption()
             thread.quit()
             thread.wait(3000)
-        stats_thread = getattr(self, '_stats_thread', None)
-        if stats_thread is not None and stats_thread.isRunning():
-            stats_thread.requestInterruption()
-            stats_thread.quit()
-            stats_thread.wait(2000)
-        search_thread = getattr(self, '_search_thread', None)
-        if search_thread is not None and search_thread.isRunning():
-            search_thread.requestInterruption()
-            search_thread.quit()
-            search_thread.wait(2000)
+        # 关闭时彻底清理后台线程（中断 + 等待 + deleteLater），避免崩溃或僵尸线程
+        for attr in ('_stats_thread', '_search_thread', 'scan_thread'):
+            t = getattr(self, attr, None)
+            if t is not None:
+                try:
+                    if t.isRunning():
+                        t.requestInterruption()
+                        t.quit()
+                        t.wait(2000)
+                    t.deleteLater()
+                except Exception:
+                    pass
+                if attr == 'scan_thread':
+                    self.scan_thread = None
+                else:
+                    setattr(self, attr, None)
         # 记住窗口几何/最大化标志/主分栏位置，保存失败绝不阻塞关闭
         try:
             # 最小化时先还原，避免 normalGeometry 未覆盖的极端退化抓到极小化坐标
@@ -2793,26 +2799,21 @@ class MainWindow(QMainWindow):
             parts = []
         else:
             parts = [p for p in rel.split(os.sep) if p and p != '.']
-        # 段路径列表：根 + 逐级
-        seg_paths = [root]
+        # 构建 (路径, 显示名) 元组列表：根 + 逐级
+        segments = [(root, os.path.basename(root) or root)]
         acc = root
         for p in parts:
             acc = os.path.join(acc, p)
-            seg_paths.append(acc)
-        seg_names = [os.path.basename(root) or root] + parts
+            segments.append((acc, p))
 
         # 超长省略：保留首段 + 末两段，中间塞不可点的 …
         MAX_SEGS = 5
-        ellipsis_at = None
-        if len(seg_names) > MAX_SEGS:
-            keep_head, keep_tail = 1, 2
-            ellipsis_at = keep_head
-            seg_names = seg_names[:keep_head] + ['…'] + seg_names[-keep_tail:]
-            seg_paths = seg_paths[:keep_head] + [None] + seg_paths[-keep_tail:]
+        if len(segments) > MAX_SEGS:
+            segments = segments[:1] + [(None, '…')] + segments[-2:]
 
         insert_at = self._breadcrumb_layout.count() - 1  # stretch 之前
-        last_idx = len(seg_names) - 1
-        for i, (name, path) in enumerate(zip(seg_names, seg_paths)):
+        last_idx = len(segments) - 1
+        for i, (path, name) in enumerate(segments):
             if i > 0:
                 sep = QLabel('›')
                 sep.setStyleSheet('color: #999;')
@@ -2962,9 +2963,13 @@ class MainWindow(QMainWindow):
         self._search_token += 1
         token = self._search_token
         old = getattr(self, '_search_thread', None)
-        if old is not None and old.isRunning():
-            old.requestInterruption()
-            old.quit()
+        if old is not None:
+            if old.isRunning():
+                old.requestInterruption()
+                old.quit()
+                old.wait(2000)
+            old.deleteLater()
+            self._search_thread = None
         name = self.search_name_edit.text()
         exts = self._search_exts_for_combo()
         mtime_after = self._search_mtime_after()
@@ -3054,12 +3059,20 @@ class MainWindow(QMainWindow):
                 pass
 
     def _close_search_results(self):
-        """关闭结果面板，回显文件树。"""
-        self._search_token += 1  # 使在跑的搜索结果失效
+        """关闭结果面板，回显文件树。断开信号并等待线程结束，避免无效搜索浪费 CPU。"""
         t = getattr(self, '_search_thread', None)
-        if t is not None and t.isRunning():
-            t.requestInterruption()
-            t.quit()
+        if t is not None:
+            # 断开信号：让在跑线程的结果静默丢弃，无需改 token 影响后续搜索
+            try:
+                t.search_ready.disconnect(self._on_search_ready)
+            except (TypeError, RuntimeError):
+                pass
+            if t.isRunning():
+                t.requestInterruption()
+                t.quit()
+                t.wait(2000)
+            t.deleteLater()
+            self._search_thread = None
         self.search_results_list.clear()
         self.search_status_label.setText('')
         self.search_results_panel.hide()
@@ -3593,11 +3606,15 @@ class MainWindow(QMainWindow):
         """启动后台线程统计 current_folder 的文件数与总大小。token 机制丢弃过期结果。"""
         self._stats_token += 1
         token = self._stats_token
-        # 取消上一个线程（不 wait，避免阻塞 UI；过期结果靠 token 丢弃）
+        # 中断并等待上一个线程结束，再启动新的，避免僵尸线程堆积
         old = getattr(self, '_stats_thread', None)
-        if old is not None and old.isRunning():
-            old.requestInterruption()
-            old.quit()
+        if old is not None:
+            if old.isRunning():
+                old.requestInterruption()
+                old.quit()
+                old.wait(2000)
+            old.deleteLater()
+            self._stats_thread = None
         root = getattr(self, 'current_folder', None)
         if not root or not os.path.isdir(root):
             self.folder_stats_label.setText('')
