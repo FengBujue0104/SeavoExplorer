@@ -2489,19 +2489,25 @@ class MainWindow(QMainWindow):
         self.scan_thread.start()
 
     def closeEvent(self, event):
-        """退出时确保后台线程已结束，避免 QThread 被销毁时仍在运行"""
+        """退出时确保后台线程已结束，避免 QThread 被销毁时仍在运行。
+        统一处理:disconnect 信号 → requestInterruption → quit → wait → deleteLater。"""
+        # 下载线程单独处理(结构不同,无 _signal_map 中的信号)
         update_thread = getattr(self, 'update_download_thread', None)
-        if update_thread is not None and update_thread.isRunning():
-            update_thread.requestInterruption()
-            update_thread.quit()
-            update_thread.wait(5000)
-        thread = getattr(self, 'scan_thread', None)
-        if thread is not None and thread.isRunning():
-            thread.requestInterruption()
-            thread.quit()
-            thread.wait(3000)
-        # 关闭时彻底清理后台线程（断开信号 + 中断 + 等待 + deleteLater），
-        # 避免 wait 超时后仍在跑的线程在窗口销毁后继续往已销毁对象发信号
+        if update_thread is not None:
+            try:
+                for sig in ('progress_changed', 'status_changed', 'download_completed', 'download_failed', 'download_canceled'):
+                    try: getattr(update_thread, sig).disconnect()
+                    except (TypeError, RuntimeError): pass
+            except Exception: pass
+            try:
+                if update_thread.isRunning():
+                    update_thread.requestInterruption()
+                    update_thread.quit()
+                    update_thread.wait(5000)
+            except Exception: pass
+            update_thread.deleteLater()
+            self.update_download_thread = None
+        # 其余线程统一处理
         _signal_map = {
             '_stats_thread': ('stats_ready',),
             '_search_thread': ('search_ready',),
@@ -2512,12 +2518,10 @@ class MainWindow(QMainWindow):
             if t is not None:
                 try:
                     for sig_name in _signal_map.get(attr, ()):
-                        signal = getattr(t, sig_name, None)
-                        if signal is not None:
-                            try:
-                                signal.disconnect()
-                            except (TypeError, RuntimeError):
-                                pass
+                        sig = getattr(t, sig_name, None)
+                        if sig is not None:
+                            try: sig.disconnect()
+                            except (TypeError, RuntimeError): pass
                     if t.isRunning():
                         t.requestInterruption()
                         t.quit()
@@ -3334,6 +3338,8 @@ class MainWindow(QMainWindow):
                 new_name = f"{base_name_without_copy}_副本{counter}{ext}"
                 dest = os.path.join(target_dir, new_name)
                 counter += 1
+                if counter > 100000:  # 安全上限,避免极端情况无限循环
+                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 '副本' 文件")
 
         if os.path.isdir(source_path):
             shutil.copytree(source_path, dest)
@@ -4691,6 +4697,7 @@ class MainWindow(QMainWindow):
             
             # 创建对话框
             dialog = QDialog(self)
+            dialog.setAttribute(Qt.WA_DeleteOnClose)  # 关闭时自动释放,避免内存泄漏
             dialog.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMaximizeButtonHint)
             
             # 创建滚动区域
