@@ -4884,6 +4884,20 @@ class MainWindow(QMainWindow):
         prev_btn.clicked.connect(lambda: show_frame(state['idx'] - 1))
         next_btn.clicked.connect(lambda: show_frame(state['idx'] + 1))
 
+        # 快捷键:左/上=上一张, 右/下=下一张
+        def on_key(event):
+            key = event.key()
+            if key in (Qt.Key_Left, Qt.Key_Up):
+                show_frame(state['idx'] - 1)
+                event.accept()
+            elif key in (Qt.Key_Right, Qt.Key_Down):
+                show_frame(state['idx'] + 1)
+                event.accept()
+            else:
+                dialog.keyPressEvent_orig(event)
+        dialog.keyPressEvent_orig = dialog.keyPressEvent
+        dialog.keyPressEvent = on_key
+
         show_frame(0)
         screen = QApplication.desktop().screenGeometry()
         dialog.resize(int(screen.width() * 0.85), int(screen.height() * 0.85))
