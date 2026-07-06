@@ -2229,20 +2229,27 @@ class MainWindow(QMainWindow):
                     "color: #555; font-style: italic; }"
                     "QPushButton:hover { background-color: #d8d8d8; }"
                 )
-                _single_shot.timeout.connect(lambda p=path: self._open_quick_access_external(p))
+                # "不预览"按钮:无论单双击,只打开一次资源管理器
+                _opened = {'done': False}
+                def _open_external_once(p=path, _flag=_opened):
+                    if _flag['done']:
+                        return  # 已打开,忽略重复触发
+                    _flag['done'] = True
+                    self._open_quick_access_external(p)
+                    # 250ms 后重置标志,允许下次点击
+                    QTimer.singleShot(300, lambda: _flag.update(done=False))
+                btn.clicked.connect(lambda checked, fn=_open_external_once: fn())
             else:
                 _single_shot.timeout.connect(lambda p=path: self._open_quick_access_path(p))
-
-            # clicked 只启动定时器；若 250ms 内发生双击,_on_double_click 会 stop 掉它
-            btn.clicked.connect(lambda checked, t=_single_shot: t.start())
-
-            def _on_double_click(event, p=path, t=_single_shot):
-                # 取消即将触发的单击动作
-                if t.isActive():
-                    t.stop()
-                self._open_with_shell(p)
-                QPushButton.mouseDoubleClickEvent(btn, event)
-            btn.mouseDoubleClickEvent = _on_double_click
+                # clicked 只启动定时器；若 250ms 内发生双击,_on_double_click 会 stop 掉它
+                btn.clicked.connect(lambda checked, t=_single_shot: t.start())
+                def _on_double_click(event, p=path, t=_single_shot):
+                    # 取消即将触发的单击动作
+                    if t.isActive():
+                        t.stop()
+                    self._open_with_shell(p)
+                    QPushButton.mouseDoubleClickEvent(btn, event)
+                btn.mouseDoubleClickEvent = _on_double_click
 
             layout.insertWidget(insert_index, btn)
             insert_index += 1
