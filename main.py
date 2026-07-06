@@ -183,7 +183,7 @@ except ImportError:
 FolderInfo = namedtuple('FolderInfo', ['sort_key', 'path', 'number', 'comment', 'source'])
 
 class ZoomableImageLabel(QLabel):
-    """支持滚轮缩放 + 按钮缩放的图片显示控件。"""
+    """支持滚轮缩放 + 按钮缩放 + 鼠标拖拽平移的图片显示控件。"""
     ZOOM_MIN = 0.1
     ZOOM_MAX = 10.0
     ZOOM_STEP = 1.25  # 每次滚轮/按钮的缩放倍率
@@ -192,12 +192,20 @@ class ZoomableImageLabel(QLabel):
         super().__init__(parent)
         self._original_pixmap = None
         self._zoom = 1.0
+        self._dragging = False
+        self._drag_start_pos = None
+        self._drag_start_scroll = None
         self.setAlignment(Qt.AlignCenter)
+        self.setCursor(Qt.OpenHandCursor)  # 默认手型提示可拖拽
 
     def setPixmap(self, pixmap):  # 覆盖:记录原始图并应用当前缩放
         self._original_pixmap = pixmap
         self._zoom = 1.0
         super().setPixmap(pixmap)
+
+    def set_zoom_callback(self, cb):
+        """设置缩放变化回调,签名: cb()"""
+        self._zoom_cb = cb
 
     def zoom_in(self):
         self._apply_zoom(self._zoom * self.ZOOM_STEP)
@@ -219,6 +227,9 @@ class ZoomableImageLabel(QLabel):
             new_size = self._original_pixmap.size() * factor
             scaled = self._original_pixmap.scaled(new_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             super().setPixmap(scaled)
+        # 通知外部更新缩放百分比显示
+        if hasattr(self, '_zoom_cb') and self._zoom_cb:
+            self._zoom_cb()
 
     def wheelEvent(self, event):  # 滚轮缩放
         delta = event.angleDelta().y()
@@ -227,6 +238,39 @@ class ZoomableImageLabel(QLabel):
         elif delta < 0:
             self.zoom_out()
         event.accept()
+
+    # ---- 鼠标拖拽平移 ----
+    def _scroll_area(self):
+        """获取父级 QScrollView,用于滚动。"""
+        p = self.parent()
+        while p is not None and not isinstance(p, QScrollArea):
+            p = p.parent()
+        return p
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._original_pixmap is not None:
+            self._dragging = True
+            self._drag_start_pos = event.pos()
+            sa = self._scroll_area()
+            if sa:
+                self._drag_start_scroll = (sa.horizontalScrollBar().value(), sa.verticalScrollBar().value())
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self._drag_start_pos is not None:
+            delta = event.pos() - self._drag_start_pos
+            sa = self._scroll_area()
+            if sa and self._drag_start_scroll is not None:
+                sa.horizontalScrollBar().setValue(self._drag_start_scroll[0] - delta.x())
+                sa.verticalScrollBar().setValue(self._drag_start_scroll[1] - delta.y())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            self.setCursor(Qt.OpenHandCursor)
+        super().mouseReleaseEvent(event)
 
     def get_zoom_text(self):
         return f'{int(self._zoom * 100)}%'
@@ -4865,9 +4909,12 @@ class MainWindow(QMainWindow):
         def refresh_label():
             zoom_label.setText(image_label.get_zoom_text())
 
+        # 按钮触发时刷新
         zoom_out_btn.clicked.connect(lambda: (image_label.zoom_out(), refresh_label()))
         zoom_in_btn.clicked.connect(lambda: (image_label.zoom_in(), refresh_label()))
         zoom_reset_btn.clicked.connect(lambda: (image_label.zoom_reset(), refresh_label()))
+        # 滚轮/任意缩放变化时也刷新(通过回调)
+        image_label.set_zoom_callback(refresh_label)
 
         layout.addStretch()
         layout.addWidget(zoom_out_btn)
