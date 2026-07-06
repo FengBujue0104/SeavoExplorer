@@ -182,6 +182,56 @@ except ImportError:
 
 FolderInfo = namedtuple('FolderInfo', ['sort_key', 'path', 'number', 'comment', 'source'])
 
+class ZoomableImageLabel(QLabel):
+    """支持滚轮缩放 + 按钮缩放的图片显示控件。"""
+    ZOOM_MIN = 0.1
+    ZOOM_MAX = 10.0
+    ZOOM_STEP = 1.25  # 每次滚轮/按钮的缩放倍率
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._original_pixmap = None
+        self._zoom = 1.0
+        self.setAlignment(Qt.AlignCenter)
+
+    def setPixmap(self, pixmap):  # 覆盖:记录原始图并应用当前缩放
+        self._original_pixmap = pixmap
+        self._zoom = 1.0
+        super().setPixmap(pixmap)
+
+    def zoom_in(self):
+        self._apply_zoom(self._zoom * self.ZOOM_STEP)
+
+    def zoom_out(self):
+        self._apply_zoom(self._zoom / self.ZOOM_STEP)
+
+    def zoom_reset(self):
+        self._apply_zoom(1.0)
+
+    def _apply_zoom(self, factor):
+        if self._original_pixmap is None:
+            return
+        factor = max(self.ZOOM_MIN, min(self.ZOOM_MAX, factor))
+        self._zoom = factor
+        if factor == 1.0:
+            super().setPixmap(self._original_pixmap)
+        else:
+            new_size = self._original_pixmap.size() * factor
+            scaled = self._original_pixmap.scaled(new_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            super().setPixmap(scaled)
+
+    def wheelEvent(self, event):  # 滚轮缩放
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.zoom_in()
+        elif delta < 0:
+            self.zoom_out()
+        event.accept()
+
+    def get_zoom_text(self):
+        return f'{int(self._zoom * 100)}%'
+
+
 class OpenWithDialog(QDialog):
     def __init__(self, file_path, parent=None):
         super().__init__(parent)
@@ -4719,7 +4769,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '警告', f'无法显示大图: {str(e)}')
 
     def _show_single_image(self, path):
-        """图片大图预览(单张)。"""
+        """图片大图预览(单张,支持缩放)。"""
         dialog = QDialog(self)
         dialog.setAttribute(Qt.WA_DeleteOnClose)
         dialog.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMaximizeButtonHint)
@@ -4727,22 +4777,23 @@ class MainWindow(QMainWindow):
         image = QImage(path)
         if image.isNull():
             return
-        image_label = QLabel()
+        image_label = ZoomableImageLabel()
         image_label.setPixmap(QPixmap.fromImage(image))
-        image_label.setAlignment(Qt.AlignCenter)
         scroll_area = QScrollArea(dialog)
         scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(image_label)
+        # 底部缩放控制栏
+        zoom_bar = self._make_zoom_bar(image_label, dialog)
         layout = QVBoxLayout(dialog)
-        layout.addWidget(scroll_area)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll_area, 1)
+        layout.addLayout(zoom_bar)
+        layout.setContentsMargins(4, 4, 4, 4)
         screen = QApplication.desktop().screenGeometry()
-        dialog.resize(int(screen.width() * 0.7), int(screen.height() * 0.7))
+        dialog.resize(int(screen.width() * 0.85), int(screen.height() * 0.85))
         dialog.exec_()
 
     def _show_video_frames(self, path):
-        """视频多帧预览(带上一张/下一张切换按钮)。"""
-        # 用更高分辨率截帧(不同于预览区的 96px 小图)
+        """视频多帧预览(上一张/下一张 + 缩放)。"""
         frames = self._capture_video_frames(path, target_height=480)
         if not frames:
             QMessageBox.information(self, '提示', '无法提取视频帧,请确认已安装 OpenCV (pip install opencv-python)')
@@ -4752,33 +4803,34 @@ class MainWindow(QMainWindow):
         dialog.setAttribute(Qt.WA_DeleteOnClose)
         dialog.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMaximizeButtonHint)
 
-        image_label = QLabel()
-        image_label.setAlignment(Qt.AlignCenter)
+        image_label = ZoomableImageLabel()
         scroll_area = QScrollArea(dialog)
         scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(image_label)
 
-        # 底部控制栏:上一张/进度/下一张
-        btn_layout = QHBoxLayout()
+        # 底部控制栏:上一张/进度/下一张 + 缩放
+        nav_layout = QHBoxLayout()
         prev_btn = QPushButton('◀ 上一张')
         next_btn = QPushButton('下一张 ▶')
         page_label = QLabel()
         page_label.setAlignment(Qt.AlignCenter)
-        btn_layout.addWidget(prev_btn)
-        btn_layout.addWidget(page_label, 1)
-        btn_layout.addWidget(next_btn)
+        nav_layout.addWidget(prev_btn)
+        nav_layout.addWidget(page_label, 1)
+        nav_layout.addWidget(next_btn)
+
+        zoom_bar = self._make_zoom_bar(image_label, dialog)
 
         layout = QVBoxLayout(dialog)
         layout.addWidget(scroll_area, 1)
-        layout.addLayout(btn_layout)
+        layout.addLayout(nav_layout)
+        layout.addLayout(zoom_bar)
         layout.setContentsMargins(4, 4, 4, 4)
 
         state = {'idx': 0, 'frames': frames}
 
         def show_frame(idx):
             state['idx'] = idx
-            pixmap = frames[idx]
-            image_label.setPixmap(pixmap)
+            image_label.setPixmap(frames[idx])  # 重置缩放并显示新帧
             pos_pct = int(VIDEO_PREVIEW_POSITIONS[idx] * 100)
             dialog.setWindowTitle(f'视频帧预览 - {os.path.basename(path)}  [{idx+1}/{len(frames)}]  {pos_pct}%')
             page_label.setText(f'{idx+1} / {len(frames)}  ({pos_pct}%)')
@@ -4790,8 +4842,40 @@ class MainWindow(QMainWindow):
 
         show_frame(0)
         screen = QApplication.desktop().screenGeometry()
-        dialog.resize(int(screen.width() * 0.7), int(screen.height() * 0.7))
+        dialog.resize(int(screen.width() * 0.85), int(screen.height() * 0.85))
         dialog.exec_()
+
+    def _make_zoom_bar(self, image_label, dialog):
+        """创建底部缩放控制栏:放大/缩小/重置 + 缩放比例显示。"""
+        from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QLabel
+        layout = QHBoxLayout()
+        zoom_out_btn = QPushButton('−')  # 缩小
+        zoom_out_btn.setFixedSize(32, 24)
+        zoom_out_btn.setToolTip('缩小 (或滚轮向下)')
+        zoom_in_btn = QPushButton('+')  # 放大
+        zoom_in_btn.setFixedSize(32, 24)
+        zoom_in_btn.setToolTip('放大 (或滚轮向上)')
+        zoom_reset_btn = QPushButton('1:1')
+        zoom_reset_btn.setFixedSize(40, 24)
+        zoom_reset_btn.setToolTip('重置为原始大小')
+        zoom_label = QLabel('100%')
+        zoom_label.setAlignment(Qt.AlignCenter)
+        zoom_label.setFixedWidth(50)
+
+        def refresh_label():
+            zoom_label.setText(image_label.get_zoom_text())
+
+        zoom_out_btn.clicked.connect(lambda: (image_label.zoom_out(), refresh_label()))
+        zoom_in_btn.clicked.connect(lambda: (image_label.zoom_in(), refresh_label()))
+        zoom_reset_btn.clicked.connect(lambda: (image_label.zoom_reset(), refresh_label()))
+
+        layout.addStretch()
+        layout.addWidget(zoom_out_btn)
+        layout.addWidget(zoom_label)
+        layout.addWidget(zoom_in_btn)
+        layout.addWidget(zoom_reset_btn)
+        layout.addStretch()
+        return layout
 
     def _capture_video_frames(self, path, target_height=480):
         """在 VIDEO_PREVIEW_POSITIONS 各时间点截图,返回等比缩放后的 QPixmap 列表。"""
