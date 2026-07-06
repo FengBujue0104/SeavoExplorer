@@ -33,7 +33,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTreeView, QTextEdit,
                                 QToolBar, QToolButton, QSizePolicy, QProgressDialog,
                                 QCheckBox, QComboBox, QListWidget, QListWidgetItem)
 from PyQt5.QtCore import QDir, Qt, QModelIndex, QThread, pyqtSignal, QRect, QUrl, QMimeData, QTimer, QEvent
-from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, QKeySequence, QFontDatabase
+from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, QKeySequence, QFontDatabase, QIntValidator
 
 _SPLASH_PIXMAP = None
 
@@ -517,7 +517,7 @@ class FolderScanThread(QThread):
                 if self.isInterruptionRequested():
                     return
                 item_path = os.path.join(directory, item)
-                if os.path.isdir(item_path):
+                if os.path.isdir(item_path) and not os.path.islink(item_path):
                     match = PROJECT_FOLDER_RE.match(item)
                     if match:
                         prefix = match.group(1)
@@ -858,6 +858,7 @@ class NewStructureDialog(QDialog):
         self.version_edit = QLineEdit('00')
         self.version_edit.setMaxLength(2)
         self.version_edit.setFixedWidth(50)
+        self.version_edit.setValidator(QIntValidator(0, 99))
         self.version_edit.textChanged.connect(self.on_version_changed)
         version_layout.addWidget(version_label)
         version_layout.addWidget(self.version_edit)
@@ -2493,6 +2494,9 @@ class MainWindow(QMainWindow):
             search_thread.wait(2000)
         # 记住窗口几何/最大化标志/主分栏位置，保存失败绝不阻塞关闭
         try:
+            # 最小化时先还原，避免 normalGeometry 未覆盖的极端退化抓到极小化坐标
+            if self.isMinimized():
+                self.showNormal()
             # normalGeometry() 返回非最大化时的几何；若窗口从未被最大化过，某些平台返回 0 尺寸 → 回退到 geometry()
             ngeo = self.normalGeometry()
             if ngeo.width() <= 0 or ngeo.height() <= 0:
