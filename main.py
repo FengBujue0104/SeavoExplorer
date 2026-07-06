@@ -74,6 +74,8 @@ PREVIEW_PDF_PAGES = 3
 PREVIEW_EXCEL_MAX_ROWS = 10
 PREVIEW_DOCX_PARAGRAPHS = 20
 PREVIEW_DOC_LINES = 50
+# 视频预览截取位置(百分比),从左到右排列
+VIDEO_PREVIEW_POSITIONS = [0.1, 0.3, 0.5, 0.7, 0.9]
 
 # 按扩展名分类的可预览文件类型（preview_file 与 show_full_image 共用，避免两份手动同步）
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.svg')
@@ -1806,7 +1808,9 @@ class MainWindow(QMainWindow):
         self.wizard_shown = False
         # 各类文件预览开关：关闭后点击对应文件不自动读取，改为显示「显示预览」按钮，降低卡顿
         for key, _name in PREVIEW_CATEGORIES:
-            setattr(self, f'preview_{key}_enabled', True)
+            # 视频预览默认关闭(需手动开启),避免无 OpenCV 时卡顿
+            default = False if key == 'video' else True
+            setattr(self, f'preview_{key}_enabled', default)
         # 窗口几何与主分栏位置（None 表示用内置默认，由 _restore_* 校验后恢复）
         self.window_geometry = None
         self.splitter_sizes = None
@@ -3900,14 +3904,31 @@ class MainWindow(QMainWindow):
 
     def _preview_video(self, file_path):
         try:
-            self.preview_tab.hide()
-            self.image_scroll_area.show()
-            video_thumbnail = self.generate_video_thumbnail(file_path)
-            if video_thumbnail:
-                scaled_image = self._scale_image(video_thumbnail)
-                pixmap = QPixmap.fromImage(scaled_image)
-                self.image_label.setPixmap(pixmap)
-                self.image_label.setToolTip(f'视频: {os.path.basename(file_path)}\n点击查看视频缩略图大图')
+            self.current_video_path = file_path
+            frames = self.generate_video_thumbnails()
+            if not frames:
+                # fall back 到单帧
+                single = self.generate_video_thumbnail(file_path)
+                if single is not None:
+                    frames = [QPixmap.fromImage(single)]
+            if frames:
+                self.preview_tab.hide()
+                self.image_scroll_area.show()
+                # 横向拼接所有帧为一张宽图
+                total_w = sum(pm.width() for pm in frames) + 4 * (len(frames) - 1)
+                max_h = max(pm.height() for pm in frames)
+                composite = QPixmap(total_w, max_h)
+                composite.fill(Qt.transparent)
+                painter = QPainter(composite)
+                x = 0
+                for pm in frames:
+                    y = (max_h - pm.height()) // 2
+                    painter.drawPixmap(x, y, pm)
+                    x += pm.width() + 4  # 4px 间距
+                painter.end()
+                self.image_label.setPixmap(composite)
+                self.image_label.setToolTip(
+                    f'视频: {os.path.basename(file_path)}\n左→右分别对应 {",".join(f"{int(p*100)}%" for p in VIDEO_PREVIEW_POSITIONS)} 位置\n点击查看大图')
                 self.current_image_path = file_path
             else:
                 self.preview_tab.show()
@@ -4740,48 +4761,75 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, '警告', f'无法显示大图: {str(e)}')
     
-    def generate_video_thumbnail(self, video_path, size=(320, 240)):
-        """生成视频缩略图"""
+    def generate_video_thumbnails(self, video_size=(320, 240)):
+        """在 VIDEO_PREVIEW_POSITIONS 各时间点截图,返回 QPixmap 列表(用于多帧预览)。"""
         if not HAS_OPENCV:
             return None
-            
         try:
-            # 打开视频文件
+            frames = []
+            for pos in VIDEO_PREVIEW_POSITIONS:
+                frame = self._capture_single_frame(video_size, pos)
+                if frame is not None:
+                    frames.append(frame)
+            return frames if frames else None
+        except Exception:
+            return None
+
+    def _capture_single_frame(self, video_size, position):
+        """在视频指定百分比位置截取一帧,返回 QPixmap;失败返回 None。"""
+        video_path = getattr(self, '_pending_video_path', None) or getattr(self, 'current_video_path', None)
+        if not video_path:
+            return None
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+        try:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0:
+                return None
+            frame_to_capture = max(0, min(int(total_frames * position), total_frames - 1))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_to_capture)
+            ret, frame = cap.read()
+            if not ret:
+                return None
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame_rgb.shape
+            q_img = QImage(frame_rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            # 缩放单帧到接近原始比例的小图,避免拼接后过宽
+            thumb_h = 96
+            thumb_w = max(1, int(round(w * thumb_h / h)))
+            pixmap = QPixmap.fromImage(q_img).scaled(thumb_w, thumb_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            return pixmap
+        except Exception:
+            return None
+        finally:
+            try: cap.release()
+            except Exception: pass
+
+    def generate_video_thumbnail(self, video_path, size=(320, 240)):
+        """保留:单个视频缩略图(中点帧),向后兼容。"""
+        if not HAS_OPENCV:
+            return None
+        try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 return None
-            
-            # 获取视频总帧数
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            # 选择中间帧作为缩略图
             frame_to_capture = total_frames // 2
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_to_capture)
-            
-            # 读取帧
             ret, frame = cap.read()
             cap.release()
-            
             if not ret:
-                # 如果中间帧读取失败，尝试读取第一帧
                 cap = cv2.VideoCapture(video_path)
                 ret, frame = cap.read()
                 cap.release()
                 if not ret:
                     return None
-            
-            # 转换颜色空间（OpenCV使用BGR，Qt使用RGB）
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # 转换为QImage
             height, width, channel = frame_rgb.shape
-            bytes_per_line = 3 * width
-            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
-
-            # copy() 让 QImage 拥有独立内存，否则它共享的 frame_rgb 缓冲在函数返回后被回收，
-            # 留下悬空指针（缩略图花屏甚至崩溃）
+            q_image = QImage(frame_rgb.data, width, height, channel * width, QImage.Format_RGB888)
             return q_image.copy()
-        except Exception as e:
+        except Exception:
             return None
     
     def keyPressEvent(self, event):
