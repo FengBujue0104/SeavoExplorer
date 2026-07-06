@@ -3832,10 +3832,9 @@ class MainWindow(QMainWindow):
         file_size = os.path.getsize(file_path)
         truncated = file_size > PREVIEW_TEXT_LIMIT
 
-        # 先按 UTF-8 严格解码（不加 errors，否则非法字节被替换、永不抛异常，GBK 回退成死代码）；
-        # 失败再尝试 GBK，最后兜底用 UTF-8 + replace 保证总能显示
+        # 尝试顺序：GBK(中文 Windows 最常见) → UTF-8 → 兜底 UTF-8 + replace
         content = None
-        for encoding in ('utf-8', 'gbk'):
+        for encoding in ('gbk', 'utf-8'):
             try:
                 with open(file_path, 'r', encoding=encoding) as f:
                     content = f.read(PREVIEW_TEXT_LIMIT) if truncated else f.read()
@@ -4352,9 +4351,17 @@ class MainWindow(QMainWindow):
                 raise RuntimeError(result['error'])
             raise RuntimeError('更新下载失败')
         finally:
+            # 先断开所有信号,避免 wait 超时后线程继续往已销毁对象发信号
+            for sig_name in ('progress_changed', 'status_changed', 'download_completed', 'download_failed', 'download_canceled'):
+                try:
+                    getattr(thread, sig_name).disconnect()
+                except (TypeError, RuntimeError):
+                    pass
             if thread.isRunning():
                 thread.requestInterruption()
+                thread.quit()
                 thread.wait(5000)
+            thread.deleteLater()
             if getattr(self, 'update_download_thread', None) is thread:
                 self.update_download_thread = None
 
@@ -4772,11 +4779,11 @@ class MainWindow(QMainWindow):
             return None
     
     def keyPressEvent(self, event):
+        handled = True
         if event.key() == Qt.Key_F11:
             # 双保险：拦掉 F11，配合 changeEvent 阻全屏
             event.accept()
-            return
-        if event.key() == Qt.Key_F5:
+        elif event.key() == Qt.Key_F5:
             self.load_filtered_folders()
             if self.current_folder:
                 self.file_model.setRootPath(self.current_folder)
@@ -4804,7 +4811,11 @@ class MainWindow(QMainWindow):
                 if selected_path:
                     self.move_to_recycle(selected_path)
         else:
-            super().keyPressEvent(event)
+            handled = False
+        # 统一调用 super() 确保事件正确传播(无论是否被本窗口处理)
+        super().keyPressEvent(event)
+        if not handled:
+            event.ignore()
 
 if __name__ == '__main__':
     try:
