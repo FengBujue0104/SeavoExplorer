@@ -40,7 +40,7 @@ _SPLASH_PIXMAP = None
 # 项目文件夹命名正则：S/M 前缀 + 3~4 位编号 + 可选 _注释 后缀。
 # 集中定义，扫描器与各定位/状态栏 helper 统一复用，避免命名规则调整时漏改。
 PROJECT_FOLDER_RE = re.compile(r'^([SM])(\d{3,4})(?:_(.*))?$')
-APP_VERSION = '0.3.0'
+APP_VERSION = '0.4.0'
 GITHUB_REPO_URL = 'https://github.com/15948707537/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/15948707537/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/15948707537/SeavoExplorer/releases/latest'
@@ -4573,9 +4573,9 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>本版本聚焦浏览体验与可控性：新增按文件类型分类开关的预览设置（文本/PDF/图片/视频/压缩包/表格/文档，关闭后点击不自动加载，降低卡顿）；'
-            '文件树上方新增可点击的面包屑路径栏；状态栏常驻显示当前项目的文件数与总大小；'
-            '记住窗口大小/位置/分栏与上次打开的项目，启动自动恢复；修复最大化记忆并禁用全屏。</p>'
+            '<p>本版本聚焦工程级浏览体验：视频预览支持 5 帧截图(10%/30%/50%/70%/90%)并可在查看器中逐帧切换(方向键/按钮)；'
+            '预览大图支持滚轮缩放、按钮缩放、鼠标拖拽平移；视频预览默认关闭(需手动开启)；'
+            '修复文件搜索结果分组与双击定位、快捷访问双击打开资源管理器、窗口最大化记忆等。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
         )
         # 关于页 logo 优先用高清 PNG 源（清晰放大），回退到多尺寸 ico
@@ -4702,7 +4702,7 @@ class MainWindow(QMainWindow):
 <tr><td>Excel 文件</td><td>.xlsx .xlsm .xls</td><td>表格形式预览</td></tr>
 <tr><td>Word 文件</td><td>.docx .doc</td><td>文档内容预览</td></tr>
 <tr><td>图片文件</td><td>.jpg .jpeg .png .bmp .gif .tiff .tif .webp .svg</td><td>缩略图预览，点击查看大图</td></tr>
-<tr><td>视频文件</td><td>.mp4 .avi .mov .mkv .flv .wmv .m4v .webm .mpg .mpeg .3gp</td><td>显示视频缩略图（需 OpenCV）</td></tr>
+<tr><td>视频文件</td><td>.mp4 .avi .mov .mkv .flv .wmv .m4v .webm .mpg .mpeg .3gp</td><td>5 帧截图预览(10%/30%/50%/70%/90%)，点击放大后可逐帧切换(方向键/按钮)</td></tr>
 <tr><td>压缩包</td><td>.zip .rar .7z</td><td>树状结构显示内容</td></tr>
 </table>
 <p style="color: #7f8c8d;">加密工程文件（.opj .dsn .sch .brd .dbk .dsnlck）无法预览，会显示提示信息而非二进制内容；请用对应 EDA 软件打开。</p>
@@ -4752,14 +4752,27 @@ class MainWindow(QMainWindow):
 <li><b>全屏已禁用</b>：本程序不支持全屏模式（避免菜单与关闭按钮不可见），按 F11 等不会进入全屏。</li>
 </ul>
 
-<h3 style="color: #2980b9;">八、新建项目与版本结构</h3>
+<h3 style="color: #2980b9;">八、视频预览与大图查看</h3>
+<p><b>1. 多帧视频预览</b></p>
+<p>视频预览默认<b>关闭</b>，需在 <b>设置 → 预览设置</b> 中手动开启(视频类)。开启后点击视频文件，会显示 5 张截图,分别对应视频 10%、30%、50%、70%、90% 位置。</p>
+<p><b>2. 视频帧查看器</b></p>
+<p>点击视频预览图可打开帧查看器,左右键或 ← → ↑ ↓ 方向键切换帧,也可点击底部「◀ 上一张」「下一张 ▶」按钮。顶部标题栏显示当前帧位置(如 [2/5] 30%)。</p>
+<p><b>3. 大图缩放与拖拽</b></p>
+<p>图片/视频帧大图查看器支持:</p>
+<ul>
+<li><b>滚轮</b>：向上放大、向下缩小</li>
+<li><b>按钮</b>：底部「−」「+」「1:1」分别控制缩小、放大、重置</li>
+<li><b>拖拽</b>：左键按住拖动平移图片(图片大于视口时)</li>
+</ul>
+
+<h3 style="color: #2980b9;">九、新建项目与版本结构</h3>
 <p><b>1. 新建项目文件夹</b></p>
 <p>点击左侧 <b>新建项目文件夹</b>，选择类型（S/M）、输入编号和保存位置，程序自动创建符合命名规则的项目文件夹。可选注释会作为文件夹名后缀保存，便于后续识别。</p>
 <p><b>2. 新建文件夹内部结构</b></p>
 <p>选中一个项目后，点击 <b>新建文件夹内部结构</b>，可创建版本文件夹（如 <code>V01</code>）及标准子文件夹（BOM、SCH、物料、评审、信号测试），也可自定义子文件夹。上次选择的模板会被记住。</p>
 <p style="color: #7f8c8d;">建议同一项目内按版本目录归档资料，例如 <code>V01</code>、<code>V02</code>，减少不同阶段文件混放。</p>
 
-<h3 style="color: #2980b9;">九、快捷键</h3>
+<h3 style="color: #2980b9;">十、快捷键</h3>
 <table border="1" cellpadding="4" cellspacing="0" style="border-collapse: collapse;">
 <tr style="background: #ecf0f1;"><th>快捷键</th><th>功能</th></tr>
 <tr><td>F5</td><td>刷新项目列表和文件树</td></tr>
@@ -4767,9 +4780,11 @@ class MainWindow(QMainWindow):
 <tr><td>Ctrl+C</td><td>复制选中的文件/文件夹（支持多选）</td></tr>
 <tr><td>Ctrl+V</td><td>粘贴副本到选中文件夹或当前项目</td></tr>
 <tr><td>Delete</td><td>将选中的文件/文件夹移入回收站（支持多选）</td></tr>
+<tr><td>← ↑</td><td>视频帧查看器:切换到上一帧</td></tr>
+<tr><td>→ ↓</td><td>视频帧查看器:切换到下一帧</td></tr>
 </table>
 
-<h3 style="color: #2980b9;">十、配置文件与数据保存</h3>
+<h3 style="color: #2980b9;">十一、配置文件与数据保存</h3>
 <ul>
 <li><b>应用设置</b>：项目路径、排序选项、快捷访问、7-Zip 路径、预览开关、窗口大小/位置/分栏、上次打开的项目等保存到 <code>seavoexplorer.json</code></li>
 <li><b>项目注释</b>：手动编辑的注释保存到 <code>seavo_comments.json</code></li>
@@ -4777,7 +4792,7 @@ class MainWindow(QMainWindow):
 <li><b>隐藏属性</b>：在 Windows 下配置文件会尽量设置为隐藏，避免误删</li>
 </ul>
 
-<h3 style="color: #2980b9;">十一、常见问题</h3>
+<h3 style="color: #2980b9;">十二、常见问题</h3>
 <ul>
 <li><b>找不到项目</b>：检查根目录是否添加正确、项目文件夹是否符合 S/M + 3~4 位数字规则；若项目在更深层目录，请勾选“包含子文件夹”</li>
 <li><b>列表顺序不符合预期</b>：检查是否启用了“按编号排序”；关闭后会按根目录添加顺序分组显示</li>
@@ -4786,7 +4801,7 @@ class MainWindow(QMainWindow):
 <li><b>不小心删除文件</b>：程序会移入系统回收站，可点击状态栏右侧回收站按钮打开并恢复</li>
 <li><b>预览内容乱码</b>：文本预览会尝试 UTF-8 / GBK；若仍乱码，请用专业编辑器或对应软件打开原文件</li>
 </ul>
-<h3 style="color: #2980b9;">十二、关于更新</h3>
+<h3 style="color: #2980b9;">十三、关于更新</h3>
 <p>如果你使用“帮助 → 检查更新”，程序会优先尝试在应用内下载更新；若网络较慢或下载失败，可直接打开 GitHub Releases 页面用浏览器下载。</p>
 '''
         )
