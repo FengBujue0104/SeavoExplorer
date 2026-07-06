@@ -2107,13 +2107,11 @@ class MainWindow(QMainWindow):
             btn.customContextMenuRequested.connect(
                 lambda pos, b=btn, data=item_data: self._show_quick_access_context_menu(b, data, pos)
             )
-            # 双击快捷访问按钮：在资源管理器中打开该文件夹
-            def _make_double_click_handler(b, p):
-                def handler(event):
-                    self._open_with_shell(p)
-                    QPushButton.mouseDoubleClickEvent(b, event)
-                return handler
-            btn.mouseDoubleClickEvent = _make_double_click_handler(btn, path)
+            # 单击/双击分开处理：单击用延迟定时器(双击可取消)，双击直接打开资源管理器
+            # 避免 QPushButton.clicked 在第一次点击 release 即触发导致双击也会跑一次单击
+            _single_shot = QTimer()
+            _single_shot.setSingleShot(True)
+            _single_shot.setInterval(250)
 
             if no_preview:
                 btn.setStyleSheet(
@@ -2121,9 +2119,21 @@ class MainWindow(QMainWindow):
                     "color: #555; font-style: italic; }"
                     "QPushButton:hover { background-color: #d8d8d8; }"
                 )
-                btn.clicked.connect(lambda checked, p=path: self._open_quick_access_external(p))
+                _single_shot.timeout.connect(lambda p=path: self._open_quick_access_external(p))
             else:
-                btn.clicked.connect(lambda checked, p=path: self._open_quick_access_path(p))
+                _single_shot.timeout.connect(lambda p=path: self._open_quick_access_path(p))
+
+            # clicked 只启动定时器；若 250ms 内发生双击,_on_double_click 会 stop 掉它
+            btn.clicked.connect(lambda checked, t=_single_shot: t.start())
+
+            def _on_double_click(event, p=path, t=_single_shot):
+                # 取消即将触发的单击动作
+                if t.isActive():
+                    t.stop()
+                self._open_with_shell(p)
+                QPushButton.mouseDoubleClickEvent(btn, event)
+            btn.mouseDoubleClickEvent = _on_double_click
+
             layout.insertWidget(insert_index, btn)
             insert_index += 1
             self.quick_access_buttons.append(btn)
@@ -2490,11 +2500,24 @@ class MainWindow(QMainWindow):
             thread.requestInterruption()
             thread.quit()
             thread.wait(3000)
-        # 关闭时彻底清理后台线程（中断 + 等待 + deleteLater），避免崩溃或僵尸线程
+        # 关闭时彻底清理后台线程（断开信号 + 中断 + 等待 + deleteLater），
+        # 避免 wait 超时后仍在跑的线程在窗口销毁后继续往已销毁对象发信号
+        _signal_map = {
+            '_stats_thread': ('stats_ready',),
+            '_search_thread': ('search_ready',),
+            'scan_thread': ('scan_completed', 'scan_progress'),
+        }
         for attr in ('_stats_thread', '_search_thread', 'scan_thread'):
             t = getattr(self, attr, None)
             if t is not None:
                 try:
+                    for sig_name in _signal_map.get(attr, ()):
+                        signal = getattr(t, sig_name, None)
+                        if signal is not None:
+                            try:
+                                signal.disconnect()
+                            except (TypeError, RuntimeError):
+                                pass
                     if t.isRunning():
                         t.requestInterruption()
                         t.quit()
