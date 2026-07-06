@@ -4882,8 +4882,8 @@ class MainWindow(QMainWindow):
             prev_btn.setEnabled(idx > 0)
             next_btn.setEnabled(idx < len(frames) - 1)
 
-        prev_btn.clicked.connect(lambda: show_frame(state['idx'] - 1))
-        next_btn.clicked.connect(lambda: show_frame(state['idx'] + 1))
+        prev_btn.clicked.connect(lambda: show_frame(max(0, state['idx'] - 1)))
+        next_btn.clicked.connect(lambda: show_frame(min(len(frames) - 1, state['idx'] + 1)))
 
         # 快捷键:左/上=上一张, 右/下=下一张(QShortcut 无需焦点)
         def go_prev():
