@@ -4777,7 +4777,7 @@ class MainWindow(QMainWindow):
 
     def _capture_single_frame(self, video_size, position):
         """在视频指定百分比位置截取一帧,返回 QPixmap;失败返回 None。"""
-        video_path = getattr(self, '_pending_video_path', None) or getattr(self, 'current_video_path', None)
+        video_path = getattr(self, 'current_video_path', None)
         if not video_path:
             return None
         cap = cv2.VideoCapture(video_path)
