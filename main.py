@@ -2987,6 +2987,11 @@ class MainWindow(QMainWindow):
         token = self._search_token
         old = getattr(self, '_search_thread', None)
         if old is not None:
+            # 先断开信号，避免 wait 超时后旧线程的信号发往已 deleteLater 的对象
+            try:
+                old.search_ready.disconnect(self._on_search_ready)
+            except (TypeError, RuntimeError):
+                pass
             if old.isRunning():
                 old.requestInterruption()
                 old.quit()
@@ -3632,6 +3637,10 @@ class MainWindow(QMainWindow):
         # 中断并等待上一个线程结束，再启动新的，避免僵尸线程堆积
         old = getattr(self, '_stats_thread', None)
         if old is not None:
+            try:
+                old.stats_ready.disconnect(self._on_stats_ready)
+            except (TypeError, RuntimeError):
+                pass
             if old.isRunning():
                 old.requestInterruption()
                 old.quit()
