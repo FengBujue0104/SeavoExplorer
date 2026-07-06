@@ -4706,60 +4706,123 @@ class MainWindow(QMainWindow):
         help_dialog.exec_()
     
     def show_full_image(self, event):
-        """点击图片或视频缩略图时显示大图"""
+        """点击图片或视频缩略图时显示大图。图片单张;视频多帧可上下帧切换。"""
         if not hasattr(self, 'current_image_path') or not self.current_image_path:
             return
-        
         try:
             ext = os.path.splitext(self.current_image_path)[1].lower()
-            image_exts = IMAGE_EXTS
-            video_exts = VIDEO_EXTS
-            
-            # 创建对话框
-            dialog = QDialog(self)
-            dialog.setAttribute(Qt.WA_DeleteOnClose)  # 关闭时自动释放,避免内存泄漏
-            dialog.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMaximizeButtonHint)
-            
-            # 创建滚动区域
-            scroll_area = QScrollArea(dialog)
-            scroll_area.setWidgetResizable(True)
-            
-            if ext in image_exts:
-                # 处理图片文件
-                dialog.setWindowTitle(f'图片查看 - {os.path.basename(self.current_image_path)}')
-                image = QImage(self.current_image_path)
-                if image.isNull():
-                    return
-                pixmap = QPixmap.fromImage(image)
-            elif ext in video_exts:
-                # 处理视频文件（显示大图缩略图）
-                dialog.setWindowTitle(f'视频缩略图 - {os.path.basename(self.current_image_path)}')
-                video_thumbnail = self.generate_video_thumbnail(self.current_image_path)
-                if not video_thumbnail:
-                    return
-                pixmap = QPixmap.fromImage(video_thumbnail)
-            else:
-                return
-            
-            # 显示图片/缩略图
-            image_label = QLabel(scroll_area)
-            image_label.setPixmap(pixmap)
-            image_label.setAlignment(Qt.AlignCenter)
-            
-            scroll_area.setWidget(image_label)
-            
-            # 设置布局
-            layout = QVBoxLayout(dialog)
-            layout.addWidget(scroll_area)
-            layout.setContentsMargins(0, 0, 0, 0)
-            
-            # 设置初始大小为屏幕的70%
-            screen_size = QApplication.desktop().screenGeometry()
-            dialog.resize(int(screen_size.width() * 0.7), int(screen_size.height() * 0.7))
-            
-            dialog.exec_()
+            if ext in IMAGE_EXTS:
+                self._show_single_image(self.current_image_path)
+            elif ext in VIDEO_EXTS:
+                self._show_video_frames(self.current_image_path)
         except Exception as e:
             QMessageBox.warning(self, '警告', f'无法显示大图: {str(e)}')
+
+    def _show_single_image(self, path):
+        """图片大图预览(单张)。"""
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMaximizeButtonHint)
+        dialog.setWindowTitle(f'图片查看 - {os.path.basename(path)}')
+        image = QImage(path)
+        if image.isNull():
+            return
+        image_label = QLabel()
+        image_label.setPixmap(QPixmap.fromImage(image))
+        image_label.setAlignment(Qt.AlignCenter)
+        scroll_area = QScrollArea(dialog)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(image_label)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(scroll_area)
+        layout.setContentsMargins(0, 0, 0, 0)
+        screen = QApplication.desktop().screenGeometry()
+        dialog.resize(int(screen.width() * 0.7), int(screen.height() * 0.7))
+        dialog.exec_()
+
+    def _show_video_frames(self, path):
+        """视频多帧预览(带上一张/下一张切换按钮)。"""
+        # 用更高分辨率截帧(不同于预览区的 96px 小图)
+        frames = self._capture_video_frames(path, target_height=480)
+        if not frames:
+            QMessageBox.information(self, '提示', '无法提取视频帧,请确认已安装 OpenCV (pip install opencv-python)')
+            return
+
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMaximizeButtonHint)
+
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignCenter)
+        scroll_area = QScrollArea(dialog)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(image_label)
+
+        # 底部控制栏:上一张/进度/下一张
+        btn_layout = QHBoxLayout()
+        prev_btn = QPushButton('◀ 上一张')
+        next_btn = QPushButton('下一张 ▶')
+        page_label = QLabel()
+        page_label.setAlignment(Qt.AlignCenter)
+        btn_layout.addWidget(prev_btn)
+        btn_layout.addWidget(page_label, 1)
+        btn_layout.addWidget(next_btn)
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(scroll_area, 1)
+        layout.addLayout(btn_layout)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        state = {'idx': 0, 'frames': frames}
+
+        def show_frame(idx):
+            state['idx'] = idx
+            pixmap = frames[idx]
+            image_label.setPixmap(pixmap)
+            pos_pct = int(VIDEO_PREVIEW_POSITIONS[idx] * 100)
+            dialog.setWindowTitle(f'视频帧预览 - {os.path.basename(path)}  [{idx+1}/{len(frames)}]  {pos_pct}%')
+            page_label.setText(f'{idx+1} / {len(frames)}  ({pos_pct}%)')
+            prev_btn.setEnabled(idx > 0)
+            next_btn.setEnabled(idx < len(frames) - 1)
+
+        prev_btn.clicked.connect(lambda: show_frame(state['idx'] - 1))
+        next_btn.clicked.connect(lambda: show_frame(state['idx'] + 1))
+
+        show_frame(0)
+        screen = QApplication.desktop().screenGeometry()
+        dialog.resize(int(screen.width() * 0.7), int(screen.height() * 0.7))
+        dialog.exec_()
+
+    def _capture_video_frames(self, path, target_height=480):
+        """在 VIDEO_PREVIEW_POSITIONS 各时间点截图,返回等比缩放后的 QPixmap 列表。"""
+        if not HAS_OPENCV:
+            return None
+        frames = []
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return None
+        try:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0:
+                return None
+            for pos in VIDEO_PREVIEW_POSITIONS:
+                frame_no = max(0, min(int(total_frames * pos), total_frames - 1))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = frame_rgb.shape
+                # 等比缩放到 target_height
+                scale = target_height / h
+                new_w = max(1, int(round(w * scale)))
+                resized = cv2.resize(frame_rgb, (new_w, target_height), interpolation=cv2.INTER_AREA)
+                q_img = QImage(resized.data, resized.shape[1], resized.shape[0], resized.shape[1] * ch, QImage.Format_RGB888).copy()
+                frames.append(QPixmap.fromImage(q_img))
+        finally:
+            try: cap.release()
+            except Exception: pass
+        return frames if frames else None
     
     def generate_video_thumbnails(self, video_size=(320, 240)):
         """在 VIDEO_PREVIEW_POSITIONS 各时间点截图,返回 QPixmap 列表(用于多帧预览)。"""
