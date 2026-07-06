@@ -1032,8 +1032,7 @@ class NewStructureDialog(QDialog):
             )
     
     def reject(self):
-        """重写取消方法，保存设置"""
-        self.save_folder_structure()
+        """重写取消方法(closeEvent 会统一保存设置,此处无需重复)"""
         super().reject()
         
     def closeEvent(self, event):
@@ -2109,7 +2108,7 @@ class MainWindow(QMainWindow):
             )
             # 单击/双击分开处理：单击用延迟定时器(双击可取消)，双击直接打开资源管理器
             # 避免 QPushButton.clicked 在第一次点击 release 即触发导致双击也会跑一次单击
-            _single_shot = QTimer()
+            _single_shot = QTimer(btn)  # parent=btn,随按钮一起释放
             _single_shot.setSingleShot(True)
             _single_shot.setInterval(250)
 
