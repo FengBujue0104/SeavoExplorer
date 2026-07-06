@@ -31,7 +31,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTreeView, QTextEdit,
                                 QHeaderView, QFormLayout,
                                 QRadioButton, QButtonGroup, QInputDialog, QSplashScreen,
                                 QToolBar, QToolButton, QSizePolicy, QProgressDialog,
-                                QCheckBox, QComboBox, QListWidget, QListWidgetItem)
+                                QCheckBox, QComboBox, QListWidget, QListWidgetItem,
+                                QShortcut)
 from PyQt5.QtCore import QDir, Qt, QModelIndex, QThread, pyqtSignal, QRect, QUrl, QMimeData, QTimer, QEvent
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, QKeySequence, QFontDatabase, QIntValidator
 
@@ -4884,19 +4885,11 @@ class MainWindow(QMainWindow):
         prev_btn.clicked.connect(lambda: show_frame(state['idx'] - 1))
         next_btn.clicked.connect(lambda: show_frame(state['idx'] + 1))
 
-        # 快捷键:左/上=上一张, 右/下=下一张
-        def on_key(event):
-            key = event.key()
-            if key in (Qt.Key_Left, Qt.Key_Up):
-                show_frame(state['idx'] - 1)
-                event.accept()
-            elif key in (Qt.Key_Right, Qt.Key_Down):
-                show_frame(state['idx'] + 1)
-                event.accept()
-            else:
-                dialog.keyPressEvent_orig(event)
-        dialog.keyPressEvent_orig = dialog.keyPressEvent
-        dialog.keyPressEvent = on_key
+        # 快捷键:左/上=上一张, 右/下=下一张(QShortcut 无需焦点)
+        QShortcut(Qt.Key_Left, dialog, lambda: show_frame(state['idx'] - 1), context=Qt.WindowShortcut)
+        QShortcut(Qt.Key_Up, dialog, lambda: show_frame(state['idx'] - 1), context=Qt.WindowShortcut)
+        QShortcut(Qt.Key_Right, dialog, lambda: show_frame(state['idx'] + 1), context=Qt.WindowShortcut)
+        QShortcut(Qt.Key_Down, dialog, lambda: show_frame(state['idx'] + 1), context=Qt.WindowShortcut)
 
         show_frame(0)
         screen = QApplication.desktop().screenGeometry()
