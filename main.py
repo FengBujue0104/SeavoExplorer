@@ -4886,10 +4886,16 @@ class MainWindow(QMainWindow):
         next_btn.clicked.connect(lambda: show_frame(state['idx'] + 1))
 
         # 快捷键:左/上=上一张, 右/下=下一张(QShortcut 无需焦点)
-        QShortcut(Qt.Key_Left, dialog, lambda: show_frame(state['idx'] - 1), context=Qt.WindowShortcut)
-        QShortcut(Qt.Key_Up, dialog, lambda: show_frame(state['idx'] - 1), context=Qt.WindowShortcut)
-        QShortcut(Qt.Key_Right, dialog, lambda: show_frame(state['idx'] + 1), context=Qt.WindowShortcut)
-        QShortcut(Qt.Key_Down, dialog, lambda: show_frame(state['idx'] + 1), context=Qt.WindowShortcut)
+        def go_prev():
+            if state['idx'] > 0:
+                show_frame(state['idx'] - 1)
+        def go_next():
+            if state['idx'] < len(frames) - 1:
+                show_frame(state['idx'] + 1)
+        QShortcut(Qt.Key_Left, dialog, go_prev, context=Qt.WindowShortcut)
+        QShortcut(Qt.Key_Up, dialog, go_prev, context=Qt.WindowShortcut)
+        QShortcut(Qt.Key_Right, dialog, go_next, context=Qt.WindowShortcut)
+        QShortcut(Qt.Key_Down, dialog, go_next, context=Qt.WindowShortcut)
 
         show_frame(0)
         screen = QApplication.desktop().screenGeometry()
