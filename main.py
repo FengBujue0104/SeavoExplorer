@@ -1387,10 +1387,23 @@ class QuickAccessSettingsDialog(_ReorderableTableDialog):
         layout.addWidget(hint_label)
         self.setLayout(layout)
     
+    def _default_name_from_path(self, path):
+        """从路径提取显示名,对 UNC 路径特殊处理。"""
+        p = path.replace('\\', '/').rstrip('/')
+        base = os.path.basename(p)
+        if base:
+            return base
+        # UNC 路径如 //server/share 取 share
+        parts = [x for x in p.split('/') if x]
+        if len(parts) >= 2 and parts[0] == '':
+            # //server/share -> 取 share
+            return parts[2] if len(parts) >= 3 else parts[-1]
+        return parts[-1] if parts else '网络文件夹'
+
     def add_path(self):
         folder_path = QFileDialog.getExistingDirectory(self, '选择文件夹')
         if folder_path:
-            default_name = os.path.basename(folder_path)
+            default_name = self._default_name_from_path(folder_path)
             name, ok = QInputDialog.getText(self, '输入名称', '请输入显示名称：', text=default_name)
             if ok:
                 if not name.strip():
@@ -2270,19 +2283,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '错误', f'无法打开文件夹: {str(e)}')
     
     def _open_quick_access_path(self, path):
-        if os.path.exists(path):
-            self.current_folder = path
-            self.file_model.setRootPath(path)
-            self.file_tree.setRootIndex(self.file_model.index(path))
-            self.new_structure_btn.setEnabled(False)
-            self._update_folder_status_bar()
-            # 面包屑焦点回到快捷访问根
-            self._breadcrumb_path = path
-            self._rebuild_breadcrumb()
-            self._close_search_results()
-            self._set_search_bar_enabled(True)
-        else:
-            QMessageBox.warning(self, '警告', f'路径不存在: {path}')
+        # os.path.exists() 对 UNC/网络路径不可靠,直接尝试加载;失败时 QFileSystemModel 不会显示内容
+        self.current_folder = path
+        self.file_model.setRootPath(path)
+        self.file_tree.setRootIndex(self.file_model.index(path))
+        self.new_structure_btn.setEnabled(False)
+        self._update_folder_status_bar()
+        # 面包屑焦点回到快捷访问根
+        self._breadcrumb_path = path
+        self._rebuild_breadcrumb()
+        self._close_search_results()
+        self._set_search_bar_enabled(True)
 
     def _get_selected_file_paths(self):
         selection_model = self.file_tree.selectionModel()
@@ -3773,11 +3784,15 @@ class MainWindow(QMainWindow):
         self._move_paths_to_recycle([file_path])
     
     def _open_with_shell(self, path):
-        """用系统默认程序打开文件/文件夹,失败弹错。
-        os.path.exists 对网络/UNC 路径(//server/share)检测不可靠(超时/误判为 False),
-        因此不做前置存在性检查;os.startfile 由 Windows Shell 处理,兼容性更好。"""
+        r"""用系统默认程序打开文件/文件夹,失败弹错。
+        对 UNC 路径(//server/share 或 \\server\share),os.startfile 会报 WinError 2,
+        改用 explorer.exe 直接打开。"""
         try:
-            os.startfile(path)
+            if path.startswith('\\\\') or path.startswith('//'):
+                # UNC 路径:用 explorer 打开
+                subprocess.Popen(['explorer', path])
+            else:
+                os.startfile(path)
         except Exception as e:
             QMessageBox.warning(self, "错误", f"无法打开：{os.path.basename(path)}\n{str(e)}")
 
