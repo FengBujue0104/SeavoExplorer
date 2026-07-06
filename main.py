@@ -2107,6 +2107,14 @@ class MainWindow(QMainWindow):
             btn.customContextMenuRequested.connect(
                 lambda pos, b=btn, data=item_data: self._show_quick_access_context_menu(b, data, pos)
             )
+            # 双击快捷访问按钮：在资源管理器中打开该文件夹
+            def _make_double_click_handler(b, p):
+                def handler(event):
+                    self._open_with_shell(p)
+                    QPushButton.mouseDoubleClickEvent(b, event)
+                return handler
+            btn.mouseDoubleClickEvent = _make_double_click_handler(btn, path)
+
             if no_preview:
                 btn.setStyleSheet(
                     "QPushButton { background-color: #e8e8e8; border: 1px solid #bbb; border-radius: 3px; "
