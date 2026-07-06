@@ -2901,7 +2901,7 @@ class MainWindow(QMainWindow):
             return
         opts = [  # (显示名, 扩展名集合或None)
             ('全部', None),
-            ('文本', TEXT_EXTS + ('.bom', '.drc', '.rep', '.rpt')),
+            ('文本', TEXT_EXTS),
             ('PDF', ('.pdf',)),
             ('图片', IMAGE_EXTS),
             ('视频', VIDEO_EXTS),
@@ -4116,7 +4116,7 @@ class MainWindow(QMainWindow):
             self.preview_tab.show()
             self.image_scroll_area.hide()
 
-            if ext in text_exts or ext in ['.bom', '.drc', '.rep', '.rpt']:
+            if ext in text_exts:
                 self._preview_text(file_path)
             elif ext == '.pdf':
                 self._preview_pdf(file_path)
@@ -4700,7 +4700,7 @@ class MainWindow(QMainWindow):
                 return
             
             # 显示图片/缩略图
-            image_label = QLabel()
+            image_label = QLabel(scroll_area)
             image_label.setPixmap(pixmap)
             image_label.setAlignment(Qt.AlignCenter)
             
