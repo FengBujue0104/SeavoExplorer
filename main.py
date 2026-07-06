@@ -3621,11 +3621,9 @@ class MainWindow(QMainWindow):
         self._move_paths_to_recycle([file_path])
     
     def _open_with_shell(self, path):
-        """用系统默认程序打开文件/文件夹，包含存在性检查与异常提示。
-        os.path.exists 通过不保证 startfile 成功（无关联程序、权限、网络盘失联等仍会抛错）。"""
-        if not os.path.exists(path):
-            QMessageBox.warning(self, "警告", f"文件或文件夹不存在：{path}")
-            return
+        """用系统默认程序打开文件/文件夹,失败弹错。
+        os.path.exists 对网络/UNC 路径(//server/share)检测不可靠(超时/误判为 False),
+        因此不做前置存在性检查;os.startfile 由 Windows Shell 处理,兼容性更好。"""
         try:
             os.startfile(path)
         except Exception as e:
