@@ -3827,19 +3827,27 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, '错误', f'创建子文件夹失败: {str(e)}')
     
     def _preview_text(self, file_path):
+        # 大文件只读前 PREVIEW_TEXT_LIMIT 字节,避免一次性读全文导致界面卡顿
+        PREVIEW_TEXT_LIMIT = 1 * 1024 * 1024  # 1 MB
+        file_size = os.path.getsize(file_path)
+        truncated = file_size > PREVIEW_TEXT_LIMIT
+
         # 先按 UTF-8 严格解码（不加 errors，否则非法字节被替换、永不抛异常，GBK 回退成死代码）；
         # 失败再尝试 GBK，最后兜底用 UTF-8 + replace 保证总能显示
         content = None
         for encoding in ('utf-8', 'gbk'):
             try:
                 with open(file_path, 'r', encoding=encoding) as f:
-                    content = f.read()
+                    content = f.read(PREVIEW_TEXT_LIMIT) if truncated else f.read()
                 break
             except UnicodeDecodeError:
                 continue
         if content is None:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
+                content = f.read(PREVIEW_TEXT_LIMIT) if truncated else f.read()
+
+        if truncated:
+            content += f'\n\n--- 文件过大,仅显示前 {self.format_file_size(PREVIEW_TEXT_LIMIT)} (共 {self.format_file_size(file_size)}) ---\n'
         self.preview_tab.setPlainText(content)
 
     def _preview_pdf(self, file_path):
