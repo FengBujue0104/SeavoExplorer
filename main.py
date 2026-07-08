@@ -3321,18 +3321,41 @@ class MainWindow(QMainWindow):
 
     
     def on_file_clicked(self, index):
+        self._cancel_pending_preview()
         file_path = self.file_model.filePath(index)
         file_info = self.file_model.fileInfo(index)
+        self.extract_metadata(file_info)
+        self._update_breadcrumb_for_item(file_path, file_info)
         if file_info.isFile():
-            self.preview_file(file_path)
-            self.extract_metadata(file_info)
+            self._pending_preview_path = file_path
+            self._preview_timer = QTimer.singleShot(250, self._execute_pending_preview)
         else:
             self._reset_preview()
-            self.metadata_tab.clear()
-        # 面包屑跟随：文件取其所在目录，目录取自身
+
+    def _cancel_pending_preview(self):
+        """取消已安排的待处理预览，避免与双击冲突。"""
+        if getattr(self, '_preview_timer', None) is not None:
+            try:
+                self._preview_timer.stop()
+            except Exception:
+                pass
+            self._preview_timer = None
+        self._pending_preview_path = None
+
+    def _execute_pending_preview(self):
+        """执行待处理的预览，如果路径仍然有效。"""
+        path = getattr(self, '_pending_preview_path', None)
+        self._preview_timer = None
+        if path and os.path.exists(path):
+            self.preview_file(path)
+        self._pending_preview_path = None
+
+    def _update_breadcrumb_for_item(self, file_path, file_info):
+        """面包屑跟随：文件取其所在目录，目录取自身。"""
         focus = os.path.dirname(file_path) if file_info.isFile() else file_path
         self._breadcrumb_path = focus
         self._rebuild_breadcrumb()
+
     
     def on_file_tree_context_menu(self, position):
         """文件树右键菜单"""
@@ -3968,6 +3991,7 @@ class MainWindow(QMainWindow):
 
     def on_file_double_clicked(self, index):
         """双击文件树项：直接打开文件或展开目录；双击空白区域打开当前文件夹"""
+        self._cancel_pending_preview()
         if not index.isValid():
             # 双击空白区域：打开当前文件夹
             if self.current_folder:
@@ -3976,7 +4000,6 @@ class MainWindow(QMainWindow):
             # 双击有效项：直接打开文件或文件夹
             file_path = self.file_model.filePath(index)
             self._open_with_shell(file_path)
-    
     def new_project(self):
         # 获取默认新建项目文件夹：优先使用用户上次选择的目录，再回退到第一条项目根目录
         if hasattr(self, 'default_new_project_folder') and self.default_new_project_folder and os.path.isdir(self.default_new_project_folder):
