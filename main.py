@@ -4889,6 +4889,7 @@ class MainWindow(QMainWindow):
 <li><b>重命名</b>：重命名文件或文件夹（也可按 <b>F2</b>）</li>
 <li><b>保存版本</b>：为文件生成日期版本副本（如 <code>S1200-10_20260708.dsn</code>），当天多次保存自动递增字母后缀（a/b/c...）</li>
 <li><b>归档到old文件夹</b>：将文件移入同目录下的 <code>old/</code> 文件夹（自动创建），支持多选</li>
+<li><b>显示隐藏文件</b>：菜单 <b>设置 → 显示隐藏文件</b>（可勾选开关），勾选后在文件树中显示以 <code>.</code> 开头的文件和系统隐藏属性的文件</li>
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
