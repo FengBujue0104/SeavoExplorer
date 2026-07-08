@@ -31,7 +31,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTreeView, QTextEdit,
                                 QHeaderView, QFormLayout,
                                 QRadioButton, QButtonGroup, QInputDialog, QSplashScreen,
                                 QToolBar, QToolButton, QSizePolicy, QProgressDialog,
-                                QCheckBox, QComboBox, QListWidget, QListWidgetItem)
+                                QCheckBox, QComboBox, QListWidget, QListWidgetItem,
+                                QAction)
 from PyQt5.QtCore import QDir, Qt, QModelIndex, QThread, pyqtSignal, QRect, QUrl, QMimeData, QTimer, QEvent
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, QKeySequence, QFontDatabase, QIntValidator
 
@@ -1870,7 +1871,9 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu('帮助')
         help_menu.addAction('新手向导', self.show_wizard)
         help_menu.addAction('使用帮助', self.show_help)
-
+        help_menu.addAction('检查更新', self.check_for_updates)
+        help_menu.addAction('关于', self.show_about)
+    
     def _on_toggle_show_hidden(self, checked):
         self.show_hidden = checked
         self.save_settings_to_file(self.settings, self.include_subfolders)
@@ -1878,11 +1881,15 @@ class MainWindow(QMainWindow):
             self._apply_hidden_files_filter()
             self.refresh_file_tree()
 
-        help_menu.addAction('新手向导', self.show_wizard)
-        help_menu.addAction('使用帮助', self.show_help)
-        help_menu.addAction('检查更新', self.check_for_updates)
-        help_menu.addAction('关于', self.show_about)
-    
+    def refresh_file_tree(self):
+        """刷新文件树显示（重新应用过滤器）。"""
+        if not self.current_folder:
+            return
+        self.file_model.setRootPath(QDir().rootPath())
+        QApplication.processEvents()
+        self.file_model.setRootPath(self.current_folder)
+        self.file_tree.setRootIndex(self.file_model.index(self.current_folder))
+
     def _init_default_settings(self):
         """初始化默认设置"""
         self.project_paths = []
@@ -1932,6 +1939,20 @@ class MainWindow(QMainWindow):
         
         # 桌面
         desktop = get_special_folder(CSIDL_DESKTOP)
+        if desktop and os.path.exists(desktop):
+            default_paths.append(('桌面', desktop, False))
+        
+        pictures = get_special_folder(CSIDL_MYPICTURES)
+        if pictures and os.path.exists(pictures):
+            default_paths.append(('图片', pictures, False))
+        
+        for letter in ['C', 'D', 'E']:
+            drive_path = f'{letter}:\\'
+            if os.path.exists(drive_path):
+                default_paths.append((f'{letter}:', drive_path, True))
+        
+        return default_paths
+
     def load_settings(self):
         self._init_default_settings()
         if not os.path.exists(self.CONFIG_FILE):
@@ -1987,12 +2008,8 @@ class MainWindow(QMainWindow):
                 self.last_project_path = config_data['last_project_path']
         except Exception:
             self._init_default_settings()
-
-        # 启动时应用隐藏文件过滤器
-        QTimer.singleShot(0, self._apply_hidden_files_filter)
-
         return self.project_paths
-        
+    
     def make_file_hidden(self, file_path):
         """将文件设置为隐藏属性"""
         try:
@@ -2585,6 +2602,7 @@ class MainWindow(QMainWindow):
             old.requestInterruption()
             old.quit()
             old.wait(3000)
+            old.deleteLater()
 
         # 清空表格
         self.motherboard_table.setRowCount(0)
@@ -3527,7 +3545,11 @@ class MainWindow(QMainWindow):
             for f in os.listdir(dir_name):
                 if f.startswith(base_name + '_' + today) and f.endswith(ext):
                     # 提取后缀部分：_YYYYMMDD 之后、.ext 之前
-                    middle = f[len(base_name + '_' + today):-len(ext)]
+                    # 对于无扩展名文件(ext='')，直接使用日期后内容
+                    if ext:
+                        middle = f[len(base_name + '_' + today):-len(ext)]
+                    else:
+                        middle = f[len(base_name + '_' + today):]
                     if middle == '' or (len(middle) == 1 and middle.isalpha()):
                         existing_suffixes.append(middle)
             # 确定下一个后缀：'' → a → b → c → ...
@@ -3814,6 +3836,8 @@ class MainWindow(QMainWindow):
                             with zf.open(info) as source, open(target_path, 'wb') as target:
                                 shutil.copyfileobj(source, target, 1 << 20)
             elif ext in ['.rar', '.7z']:
+                # 防 traversal：校验解压目标必须在 extract_dir 内
+                # 7z/RAR 无法在解压前逐条校验路径，因此用 -o 严格限定输出目录
                 self._extract_with_7z(archive_path, extract_dir)
             
             self.statusBar().showMessage(f"已解压到: {extract_dir}")
@@ -4578,6 +4602,19 @@ class MainWindow(QMainWindow):
         progress.setAutoReset(False)
 
         result = {'path': None, 'error': None, 'canceled': False}
+        # 清理之前的下载线程
+        old_thread = getattr(self, 'update_download_thread', None)
+        if old_thread is not None:
+            try:
+                old_thread.requestInterruption()
+                old_thread.quit()
+                old_thread.wait(2000)
+            except Exception:
+                pass
+            try:
+                old_thread.deleteLater()
+            except Exception:
+                pass
         thread = UpdateDownloadThread(url, save_path, expected_size, self)
         self.update_download_thread = thread
 
