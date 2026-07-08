@@ -1862,8 +1862,22 @@ class MainWindow(QMainWindow):
         settings_menu.addAction('快捷访问设置', self.show_quick_access_settings_dialog)
         settings_menu.addAction('7-Zip路径设置', self.show_7zip_settings_dialog)
         settings_menu.addAction('预览设置', self.show_preview_settings_dialog)
+        self.show_hidden_action = QAction('显示隐藏文件', self, checkable=True)
+        self.show_hidden_action.setChecked(getattr(self, 'show_hidden', False))
+        self.show_hidden_action.triggered.connect(self._on_toggle_show_hidden)
+        settings_menu.addAction(self.show_hidden_action)
         settings_menu.addAction('恢复已隐藏项目', self.show_restore_hidden_projects_dialog)
         help_menu = menubar.addMenu('帮助')
+        help_menu.addAction('新手向导', self.show_wizard)
+        help_menu.addAction('使用帮助', self.show_help)
+
+    def _on_toggle_show_hidden(self, checked):
+        self.show_hidden = checked
+        self.save_settings_to_file(self.settings, self.include_subfolders)
+        if self.current_folder:
+            self._apply_hidden_files_filter()
+            self.refresh_file_tree()
+
         help_menu.addAction('新手向导', self.show_wizard)
         help_menu.addAction('使用帮助', self.show_help)
         help_menu.addAction('检查更新', self.check_for_updates)
@@ -1918,20 +1932,6 @@ class MainWindow(QMainWindow):
         
         # 桌面
         desktop = get_special_folder(CSIDL_DESKTOP)
-        if desktop and os.path.exists(desktop):
-            default_paths.append(('桌面', desktop, False))
-        
-        pictures = get_special_folder(CSIDL_MYPICTURES)
-        if pictures and os.path.exists(pictures):
-            default_paths.append(('图片', pictures, False))
-        
-        for letter in ['C', 'D', 'E']:
-            drive_path = f'{letter}:\\'
-            if os.path.exists(drive_path):
-                default_paths.append((f'{letter}:', drive_path, True))
-        
-        return default_paths
-
     def load_settings(self):
         self._init_default_settings()
         if not os.path.exists(self.CONFIG_FILE):
@@ -1987,8 +1987,12 @@ class MainWindow(QMainWindow):
                 self.last_project_path = config_data['last_project_path']
         except Exception:
             self._init_default_settings()
+
+        # 启动时应用隐藏文件过滤器
+        QTimer.singleShot(0, self._apply_hidden_files_filter)
+
         return self.project_paths
-    
+        
     def make_file_hidden(self, file_path):
         """将文件设置为隐藏属性"""
         try:
