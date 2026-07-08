@@ -112,8 +112,7 @@ The right-side file tree supports both preview and mutation operations:
 
 - single click previews files and extracts metadata
 - double click opens files/folders with the OS default handler
-- context menu and shortcuts support copy-as-path-buffer, paste-copy, rename, zip creation, smart extract, and recycle-bin deletion
-
+- context menu and shortcuts support copy-as-path-buffer, paste-copy, rename, zip creation, smart extract, recycle-bin deletion, save version, and archive to old folder
 Preview dispatch is centralized in `preview_file()`, which routes by extension to specialized helpers:
 
 - text: plain text read with UTF-8 / GBK fallback
@@ -150,8 +149,14 @@ There are two separate creation flows:
 
 `NewStructureDialog` also persists the last-used folder-structure template into settings, so future changes should keep its in-dialog state synchronized with `MainWindow.folder_structure` and `save_settings_to_file()`.
 
-## Packaging notes
 
+### File versioning and archive
+
+Two helper workflows for engineering file management:
+
+- **Save version** (`save_file_version`): right-click a file → "保存版本". Generates a date-stamped copy like `S1200-10_20260708.dsn`. Multiple saves on the same day auto-increment a letter suffix (a/b/c...). If the filename already ends with `_YYYYMMDD` or `_YYYYMMDD[a-z]`, the existing date suffix is stripped before regeneration to avoid duplication.
+
+## Packaging notes
 This project is Windows-specific in practice:
 
 - the GUI depends on PyQt5

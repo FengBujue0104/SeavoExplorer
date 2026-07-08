@@ -40,7 +40,7 @@ _SPLASH_PIXMAP = None
 # 项目文件夹命名正则：S/M 前缀 + 3~4 位编号 + 可选 _注释 后缀。
 # 集中定义，扫描器与各定位/状态栏 helper 统一复用，避免命名规则调整时漏改。
 PROJECT_FOLDER_RE = re.compile(r'^([SM])(\d{3,4})(?:_(.*))?$')
-APP_VERSION = '0.4.1'
+APP_VERSION = '0.4.2'
 GITHUB_REPO_URL = 'https://github.com/15948707537/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/15948707537/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/15948707537/SeavoExplorer/releases/latest'
@@ -1499,7 +1499,9 @@ class WizardDialog(QDialog):
             <ul>
             <li><b>Ctrl+C / 右键复制</b>：复制到剪贴板，可在资源管理器粘贴，也保留程序内“粘贴副本”</li>
             <li><b>Ctrl+V / 右键粘贴副本</b>：粘贴到选中文件夹或当前项目（自动处理重名）</li>
-            <li><b>F2</b>：重命名单个文件</li>
+            <li><b>F2 / 右键重命名</b>：重命名单个文件</li>
+            <li><b>右键保存版本</b>：为文件生成日期版本副本（如 S1200-10_20260708.dsn），自动递增字母后缀</li>
+            <li><b>右键归档到old文件夹</b>：将选中文件移入同目录下的 old/ 文件夹（自动创建），支持多选</li>
             <li><b>Delete</b>：移入回收站</li>
             <li>右键还可“添加到 zip 压缩包”“智能解压”</li>
             </ul>
@@ -3354,16 +3356,19 @@ class MainWindow(QMainWindow):
             if not multi_selected:
                 paste_copy_action = menu.addAction('粘贴副本')
                 rename_action = menu.addAction('重命名')
+                save_version_action = menu.addAction('保存版本')
                 if os.path.isdir(file_path):
                     terminal_action = menu.addAction('在终端中打开')
                 menu.addSeparator()
                 if is_archive:
                     extract_action = menu.addAction('智能解压')
                 menu.addSeparator()
+                archive_action = menu.addAction('归档到old文件夹')
                 recycle_action = menu.addAction('移入回收站')
                 paste_copy_action.setEnabled(self._has_pasteable_clipboard())
             else:
                 menu.addSeparator()
+                archive_action = menu.addAction('归档到old文件夹')
                 recycle_action = menu.addAction('移入回收站')
 
             action = menu.exec_(self.file_tree.viewport().mapToGlobal(position))
@@ -3379,6 +3384,8 @@ class MainWindow(QMainWindow):
                 self.paste_copy(file_path)
             elif not multi_selected and action == rename_action:
                 self.rename_item(file_path)
+            elif not multi_selected and action == save_version_action:
+                self.save_file_version(file_path)
             elif not multi_selected and terminal_action and action == terminal_action:
                 self.open_folder_in_terminal(file_path)
             elif not multi_selected and extract_action and action == extract_action:
@@ -3388,6 +3395,8 @@ class MainWindow(QMainWindow):
                     self._move_paths_to_recycle(selected_paths)
                 else:
                     self.move_to_recycle(file_path)
+            elif action == archive_action:
+                self.archive_to_old_folder(selected_paths)
         else:
             # 右键点击了空白区域
             paste_copy_action = menu.addAction('粘贴副本')
@@ -3474,6 +3483,48 @@ class MainWindow(QMainWindow):
         else:
             shutil.copy2(source_path, dest)
     
+    def save_file_version(self, file_path):
+        """保存文件版本：生成 文件名_YYYYMMDD[后缀].ext 的副本。
+
+        命名规则（与手动习惯一致）：
+          当天第一个版本 → S1200-10_20260708.dsn
+          当天第二个版本 → S1200-10_20260708a.dsn
+          当天第三个版本 → S1200-10_20260708b.dsn
+        """
+        try:
+            if not os.path.isfile(file_path):
+                return
+            dir_name = os.path.dirname(file_path)
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            ext = os.path.splitext(file_path)[1]
+            # 若文件名末尾已有 _YYYYMMDD 或 _YYYYMMDD[a-z] 后缀，剥离它避免重复
+            date_match = re.search(r'_\d{8}[a-z]?$', base_name)
+            if date_match:
+                base_name = base_name[:date_match.start()]
+            today = time.strftime('%Y%m%d')
+            # 查找当天已有的版本
+            existing_suffixes = []
+            for f in os.listdir(dir_name):
+                if f.startswith(base_name + '_' + today) and f.endswith(ext):
+                    # 提取后缀部分：_YYYYMMDD 之后、.ext 之前
+                    middle = f[len(base_name + '_' + today):-len(ext)]
+                    if middle == '' or (len(middle) == 1 and middle.isalpha()):
+                        existing_suffixes.append(middle)
+            # 确定下一个后缀：'' → a → b → c → ...
+            all_suffixes = set(existing_suffixes)
+            candidate = ''
+            if candidate in all_suffixes:
+                candidate = 'a'
+                while candidate in all_suffixes:
+                    candidate = chr(ord(candidate) + 1)
+            next_suffix = candidate
+            new_name = f'{base_name}_{today}{next_suffix}{ext}'
+            new_path = os.path.join(dir_name, new_name)
+            shutil.copy2(file_path, new_path)
+            self.statusBar().showMessage(f'已保存版本: {new_name}')
+        except Exception as e:
+            QMessageBox.warning(self, '错误', f'保存版本失败: {str(e)}')
+
     def rename_item(self, file_path):
         """重命名文件或文件夹"""
         try:
@@ -3798,6 +3849,31 @@ class MainWindow(QMainWindow):
             self.folder_stats_label.setText(f'{count}+ 个文件 · ≥{self.format_file_size(size)}')
         else:
             self.folder_stats_label.setText(f'{count} 个文件 · {self.format_file_size(size)}')
+
+    def archive_to_old_folder(self, file_paths):
+        """将选中文件/文件夹移入同目录下的 old 文件夹（不存在则自动创建）。"""
+        try:
+            if not file_paths:
+                return
+            target_dir = os.path.join(os.path.dirname(file_paths[0]), 'old')
+            os.makedirs(target_dir, exist_ok=True)
+            moved = 0
+            for file_path in file_paths:
+                if not os.path.exists(file_path):
+                    continue
+                dest = os.path.join(target_dir, os.path.basename(file_path))
+                # 重名时追加数字
+                if os.path.exists(dest):
+                    base, ext = os.path.splitext(os.path.basename(file_path))
+                    i = 1
+                    while os.path.exists(os.path.join(target_dir, f'{base}_{i}{ext}')):
+                        i += 1
+                    dest = os.path.join(target_dir, f'{base}_{i}{ext}')
+                shutil.move(file_path, dest)
+                moved += 1
+            self.statusBar().showMessage(f'已归档 {moved} 个项目到 old/')
+        except Exception as e:
+            QMessageBox.warning(self, '错误', f'归档失败: {str(e)}')
 
     def move_to_recycle(self, file_path):
         """移入回收站"""
@@ -4608,7 +4684,9 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>本版本聚焦工程级浏览体验：视频预览支持 5 帧截图(10%/30%/50%/70%/90%)并可在查看器中逐帧切换(方向键/按钮)；'
+            '<p>本版本新增文件版本管理（保存版本）、归档到old文件夹；'
+            '修复F5刷新文件树不更新、右键重命名失效等bug；'
+            '视频预览支持 5 帧截图(10%/30%/50%/70%/90%)并可在查看器中逐帧切换；'
             '预览大图支持滚轮缩放、按钮缩放、鼠标拖拽平移；视频预览默认关闭(需手动开启)；'
             '修复文件搜索结果分组与双击定位、快捷访问双击打开资源管理器、窗口最大化记忆等。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
@@ -4709,15 +4787,17 @@ class MainWindow(QMainWindow):
 <p><b>3. 右键菜单</b></p>
 <p>选中<b>单个</b>文件/文件夹时：</p>
 <ul>
-<li><b>复制</b>：复制到剪贴板，既可在资源管理器中粘贴，也可用程序内“粘贴副本”</li>
+<li><b>复制</b>：复制到剪贴板，既可在资源管理器中粘贴，也可用程序内"粘贴副本"</li>
 <li><b>粘贴副本</b>：把剪贴板中的内容复制到当前位置，自动处理重名（追加 <code>_副本N</code>）</li>
 <li><b>重命名</b>：重命名文件或文件夹（也可按 <b>F2</b>）</li>
+<li><b>保存版本</b>：为文件生成日期版本副本（如 <code>S1200-10_20260708.dsn</code>），当天多次保存自动递增字母后缀（a/b/c...）</li>
+<li><b>归档到old文件夹</b>：将文件移入同目录下的 <code>old/</code> 文件夹（自动创建），支持多选</li>
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
 <li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并优先尝试管理员身份</li>
 </ul>
-<p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>添加到zip压缩包</b>、<b>移入回收站</b>。</p>
+<p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>添加到zip压缩包</b>、<b>归档到old文件夹</b>、<b>移入回收站</b>。</p>
 <p>在<b>空白处</b>右键：仅显示<b>粘贴副本</b>，粘贴到当前项目文件夹。</p>
 
 <p><b>4. 复制与粘贴的目标规则</b></p>
