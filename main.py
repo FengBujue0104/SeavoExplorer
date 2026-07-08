@@ -3899,7 +3899,11 @@ class MainWindow(QMainWindow):
                 # UNC 路径:用 explorer 打开
                 subprocess.Popen(['explorer', path])
             else:
-                os.startfile(path)
+                # 使用 ShellExecuteW 更可靠，能正确处理无关联程序的情况
+                result = ctypes.windll.shell32.ShellExecuteW(None, 'open', path, None, None, 1)
+                if result <= 32:
+                    # ShellExecuteW 失败，回退到 os.startfile
+                    os.startfile(path)
         except Exception as e:
             QMessageBox.warning(self, "错误", f"无法打开：{os.path.basename(path)}\n{str(e)}")
 
