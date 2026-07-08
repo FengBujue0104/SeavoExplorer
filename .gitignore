@@ -1,0 +1,21 @@
+# Build artifacts
+dist/
+build/
+backup/
+run/
+*.spec.bak
+build_log.txt
+favicon.ico.bak
+favicon_src.png.bak
+SeavoExplorer.spec
+
+# PyInstaller
+__pycache__/
+*.pyc
+
+# Local Claude Code config (personal, not shared)
+.claude/settings.local.json
+
+# Sidecar app state (generated at runtime)
+seavoexplorer.json
+seavo_comments.json
