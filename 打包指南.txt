@@ -1,0 +1,144 @@
+# SeavoExplorer 打包指南
+
+本文说明如何将主板项目文件浏览器打包为 Windows 可执行程序。
+
+## 系统要求
+
+- Windows 10/11
+- Python 3.8 或更高版本
+- 建议至少 2GB 可用内存
+- 推荐使用普通用户终端打包；PyInstaller 不建议在管理员终端中运行
+
+## 安装依赖
+
+在项目目录下执行：
+
+```bash
+py -m pip install -r requirements.txt
+```
+
+主要依赖：
+
+- PyQt5：GUI 框架
+- PyPDF2：PDF 预览
+- openpyxl / xlrd：Excel 预览
+- python-docx / olefile：Word 预览
+- Pillow：图片处理和图标生成
+- opencv-python / numpy：视频缩略图生成
+- PyInstaller：打包工具
+
+说明：程序对 `.rar` / `.7z` 的预览和解压依赖外部 `7z.exe`，不是通过 `rarfile` 或 `py7zr` 打包进程序。请安装 7-Zip，或将 `7z.exe` 放在 exe 同目录，也可在程序内通过“设置 → 7-Zip路径设置”指定路径。
+
+## 推荐方式：使用打包脚本
+
+### 单文件 exe
+
+```bash
+py build_onefile.py
+```
+
+输出：
+
+```text
+dist/SeavoExplorer.exe
+```
+
+这是发布给用户下载时最常用的格式。
+
+### 单目录版本
+
+```bash
+py build_onedir.py
+```
+
+输出：
+
+```text
+dist/SeavoExplorer/
+```
+
+分发时需要将整个 `dist/SeavoExplorer/` 目录打包为 zip；不要只复制其中的 exe。
+
+## 使用 PyInstaller spec
+
+也可以使用仓库中的 `main.spec`：
+
+```bash
+pyinstaller main.spec
+```
+
+`main.spec` 当前输出名称为：
+
+```text
+主板项目文件浏览器.exe
+```
+
+注意：辅助脚本 `build_onefile.py` / `build_onedir.py` 输出名称为 `SeavoExplorer`。如果要统一名称，请先确认目标发布命名后再同步修改脚本和 spec。
+
+## 打包内容说明
+
+打包脚本会：
+
+1. 安装/确认必要依赖。
+2. 运行 `make_ico.py` 生成多尺寸 `favicon.ico`。
+3. 调用 PyInstaller 打包 `main.py`。
+4. 将 `favicon.ico` 和 `favicon_src.png` 一并加入程序资源，保证窗口、任务栏和关于页图标可用。
+5. 排除未使用的大型模块，例如 Qt WebEngine、Qt Multimedia、matplotlib、scipy、jupyter 等，以减小体积。
+
+## 配置文件位置
+
+程序运行时会在程序所在目录旁保存配置文件：
+
+- `seavoexplorer.json`：项目路径、排序选项、快捷访问、7-Zip 路径、置顶/隐藏项目等设置。
+- `seavo_comments.json`：项目注释。
+
+开发环境中，这些文件保存在源码目录；打包后，这些文件保存在 exe 所在目录。Windows 下程序会尽量将配置文件设为隐藏。
+
+## 发布脚本
+
+如需创建 GitHub Release，可使用：
+
+```bash
+py release.py v0.2.0
+py release.py --build v0.2.0
+```
+
+`--build` 会先运行 `build_onefile.py`，然后发布 `dist/SeavoExplorer.exe`。
+
+发布脚本依赖：
+
+- GitHub CLI：`gh`
+- 已登录 GitHub：`gh auth login`
+- 当前仓库 remote 指向发布目标
+
+## 常见问题
+
+### 1. 打包失败：PermissionError / WinError 5，无法覆盖 dist/SeavoExplorer.exe
+
+通常是旧版 exe 正在运行，或被资源管理器、杀毒软件暂时占用。请关闭正在运行的 `SeavoExplorer.exe`，等待几秒后重新打包。
+
+### 2. 打包后 .rar / .7z 无法预览或解压
+
+确认 7-Zip 可用。程序查找顺序为：
+
+1. 程序设置中手动指定的路径
+2. exe 或脚本所在目录下的 `7z.exe`
+3. `C:\Program Files\7-Zip\7z.exe`
+4. `C:\Program Files (x86)\7-Zip\7z.exe`
+
+### 3. 打包后图标不清晰或关于页无图标
+
+确认 `favicon_src.png` 和 `favicon.ico` 存在，然后重新运行：
+
+```bash
+py make_ico.py
+py build_onefile.py
+```
+
+### 4. 启动后没有项目
+
+首次启动需要在“设置 → 项目文件夹设置”中添加项目根目录。程序不会硬编码扫描某个固定路径。
+
+### 5. 需要调试启动错误
+
+GUI 打包默认隐藏控制台。如果需要查看启动异常，可临时去掉 `--windowed`，或在 spec 中设置 `console=True` 后重新打包。
