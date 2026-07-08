@@ -40,11 +40,10 @@ pyinstaller main.spec
 
 ### Release
 
-`release.py` automates publishing a GitHub Release with the packaged exe. It is Windows + `gh` CLI specific and targets the `15948707537/SeavoExplorer` repo over the `origin` remote.
-
+`release.py` automates publishing a GitHub Release with the packaged exe. It is Windows + `gh` CLI specific and targets the `FengBujue0104/SeavoExplorer` repo over the `origin` remote.
 ```bash
-py release.py v0.2.3           # tag, push, create release, upload dist/SeavoExplorer.exe
-py release.py --build v0.2.3   # run build_onefile.py first, then release
+py release.py v0.4.2           # tag, push, create release, upload dist/SeavoExplorer.exe
+py release.py --build v0.4.2   # run build_onefile.py first, then release
 py release.py                  # prompt for the version interactively
 ```
 
