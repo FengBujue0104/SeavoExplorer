@@ -1192,12 +1192,13 @@ class _ReorderableTableDialog(QDialog):
 
 
 class SettingsDialog(_ReorderableTableDialog):
-    def __init__(self, current_paths, include_subfolders=False, sort_by_number=False, parent=None):
+    def __init__(self, current_paths, include_subfolders=False, sort_by_number=False, parent=None, show_hidden=False):
         super().__init__(parent)
         self.current_paths = current_paths if current_paths is not None else []
         self.paths = list(self.current_paths)
         self.include_subfolders = include_subfolders
         self.sort_by_number = sort_by_number
+        self.show_hidden = show_hidden
         self.setWindowTitle('项目文件夹设置')
         self.setGeometry(300, 300, 550, 450)
         
@@ -1238,6 +1239,10 @@ class SettingsDialog(_ReorderableTableDialog):
         self.sort_by_number_checkbox.setCheckable(True)
         self.sort_by_number_checkbox.setChecked(self.sort_by_number)
         
+        self.show_hidden_checkbox = QPushButton('显示隐藏文件（以.开头或系统隐藏属性）')
+        self.show_hidden_checkbox.setCheckable(True)
+        self.show_hidden_checkbox.setChecked(self.show_hidden)
+        
         save_btn = QPushButton('保存设置')
         save_btn.clicked.connect(self.save_settings)
         
@@ -1247,6 +1252,7 @@ class SettingsDialog(_ReorderableTableDialog):
         layout.addLayout(sort_layout)
         layout.addWidget(self.include_subfolders_checkbox)
         layout.addWidget(self.sort_by_number_checkbox)
+        layout.addWidget(self.show_hidden_checkbox)
         layout.addWidget(save_btn)
         self.setLayout(layout)
         
@@ -1276,56 +1282,12 @@ class SettingsDialog(_ReorderableTableDialog):
         self.paths = paths
         self.include_subfolders = self.include_subfolders_checkbox.isChecked()
         self.sort_by_number = self.sort_by_number_checkbox.isChecked()
+        self.show_hidden = self.show_hidden_checkbox.isChecked()
         self.accept()
         
     def get_settings(self):
-        return self.paths, self.include_subfolders, self.sort_by_number
+        return self.paths, self.include_subfolders, self.sort_by_number, self.show_hidden
 
-
-class SevenZipSettingsDialog(QDialog):
-    def __init__(self, current_path, parent=None):
-        super().__init__(parent)
-        self.current_path = current_path or ''
-        self.archive_tool_path = self.current_path
-        self.setWindowTitle('7-Zip路径设置')
-        self.setGeometry(300, 300, 450, 120)
-        
-        layout = QVBoxLayout()
-        
-        path_layout = QHBoxLayout()
-        path_layout.addWidget(QLabel('7z.exe路径:'))
-        self.path_edit = QLineEdit()
-        self.path_edit.setText(self.current_path)
-        self.path_edit.setPlaceholderText('自动检测7-Zip')
-        browse_btn = QPushButton('浏览...')
-        browse_btn.clicked.connect(self.browse_path)
-        path_layout.addWidget(self.path_edit)
-        path_layout.addWidget(browse_btn)
-        
-        btn_layout = QHBoxLayout()
-        save_btn = QPushButton('保存设置')
-        save_btn.clicked.connect(self.save_settings)
-        btn_layout.addStretch()
-        btn_layout.addWidget(save_btn)
-        
-        layout.addLayout(path_layout)
-        layout.addLayout(btn_layout)
-        self.setLayout(layout)
-    
-    def browse_path(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, '选择7z.exe', '', 
-            '可执行文件 (*.exe);;所有文件 (*.*)'
-        )
-        if file_path:
-            self.path_edit.setText(file_path)
-    
-    def save_settings(self):
-        self.archive_tool_path = self.path_edit.text().strip()
-        self.accept()
-    
-    def get_settings(self):
-        return self.archive_tool_path
 
 
 class QuickAccessSettingsDialog(_ReorderableTableDialog):
@@ -1921,8 +1883,8 @@ class MainWindow(QMainWindow):
         self.quick_access_paths = self._get_default_quick_access_paths()
         self.pinned_folders = []
         self.hidden_folders = []
+        self.show_hidden = False
         self.wizard_shown = False
-        # 各类文件预览开关：关闭后点击对应文件不自动读取，改为显示「显示预览」按钮，降低卡顿
         for key, _name in PREVIEW_CATEGORIES:
             # 视频预览默认关闭(需手动开启),避免无 OpenCV 时卡顿
             default = False if key == 'video' else True
@@ -2009,6 +1971,8 @@ class MainWindow(QMainWindow):
                 self.hidden_folders = config_data['hidden_folders']
             if 'wizard_shown' in config_data:
                 self.wizard_shown = config_data['wizard_shown']
+            if 'show_hidden' in config_data:
+                self.show_hidden = config_data['show_hidden']
             for key, _name in PREVIEW_CATEGORIES:
                 cfg_key = f'preview_{key}_enabled'
                 if cfg_key in config_data:
@@ -2074,7 +2038,8 @@ class MainWindow(QMainWindow):
                 'quick_access_paths': getattr(self, 'quick_access_paths', []),
                 'pinned_folders': getattr(self, 'pinned_folders', []),
                 'hidden_folders': getattr(self, 'hidden_folders', []),
-                'wizard_shown': getattr(self, 'wizard_shown', False)
+                'wizard_shown': getattr(self, 'wizard_shown', False),
+                'show_hidden': getattr(self, 'show_hidden', False)
             }
             for key, _name in PREVIEW_CATEGORIES:
                 cfg_key = f'preview_{key}_enabled'
@@ -2143,15 +2108,30 @@ class MainWindow(QMainWindow):
             return False
     
     def show_settings_dialog(self):
-        dialog = SettingsDialog(self.settings, self.include_subfolders, self.sort_by_number, self)
+        dialog = SettingsDialog(self.settings, self.include_subfolders, self.sort_by_number, self, getattr(self, 'show_hidden', False))
         if dialog.exec_():
-            new_paths, new_include_subfolders, new_sort_by_number = dialog.get_settings()
+            new_paths, new_include_subfolders, new_sort_by_number, new_show_hidden = dialog.get_settings()
             self.sort_by_number = new_sort_by_number
+            self.show_hidden = new_show_hidden
             if self.save_settings_to_file(new_paths, new_include_subfolders):
                 self.settings = new_paths
                 self.include_subfolders = new_include_subfolders
                 QMessageBox.information(self, '成功', '设置已保存')
                 self.load_filtered_folders()
+                # 刷新文件树以应用隐藏文件设置
+                if self.current_folder:
+                    self._apply_hidden_files_filter()
+                    self.refresh_file_tree()
+    
+    def _apply_hidden_files_filter(self):
+        """根据 show_hidden 设置更新文件模型过滤器。"""
+        if getattr(self, 'show_hidden', False):
+            # 显示隐藏文件：只过滤 . 和 ..
+            self.file_model.setFilter(QDir.NoDotAndDotDot | QDir.AllEntries | QDir.Hidden)
+        else:
+            # 默认：过滤 . .. 和隐藏文件
+            self.file_model.setFilter(QDir.NoDotAndDotDot | QDir.AllEntries)
+        
     
     def show_7zip_settings_dialog(self):
         """显示7-Zip设置对话框"""
