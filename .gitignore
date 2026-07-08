@@ -3,11 +3,14 @@ dist/
 build/
 backup/
 run/
-*.spec.bak
 build_log.txt
-favicon.ico.bak
-favicon_src.png.bak
 SeavoExplorer.spec
+error_details.log
+
+# Generated icons (produced by make_ico.py from icon.jpg)
+favicon.ico
+favicon_src.png
+*.bak
 
 # PyInstaller
 __pycache__/
@@ -16,3 +19,10 @@ __pycache__/
 # Sidecar app state (generated at runtime)
 seavoexplorer.json
 seavo_comments.json
+
+# Debug / temp files
+*.log
+*.part
+.claude/
+patch*.py
+archive_fix.txt
