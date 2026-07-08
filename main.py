@@ -1988,6 +1988,8 @@ class MainWindow(QMainWindow):
             return self.project_paths
         try:
             if 'project_paths' in config_data and config_data['project_paths']:
+                if not isinstance(config_data['project_paths'], list):
+                    raise TypeError('project_paths 类型错误')
                 self.project_paths = config_data['project_paths']
             if 'include_subfolders' in config_data:
                 self.include_subfolders = config_data['include_subfolders']
@@ -3797,9 +3799,9 @@ class MainWindow(QMainWindow):
                             os.makedirs(target_path, exist_ok=True)
                         else:
                             os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                            # 用 with 同时管理 source 与 target，确保异常时也释放读句柄
+                            # 分块读写，避免大文件一次性读入内存导致 OOM
                             with zf.open(info) as source, open(target_path, 'wb') as target:
-                                target.write(source.read())
+                                shutil.copyfileobj(source, target, 1 << 20)
             elif ext in ['.rar', '.7z']:
                 self._extract_with_7z(archive_path, extract_dir)
             
@@ -4094,11 +4096,30 @@ class MainWindow(QMainWindow):
         available_width, available_height = self._get_preview_size()
         return image.scaled(available_width, available_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
+    # 大图安全阈值：超过此尺寸先缩到该尺寸再加载，避免 OOM
+    IMAGE_SAFE_MAX_DIM = 4096
+
+    def _load_image_safe(self, file_path):
+        """安全加载图片：超大图先缩到 IMAGE_SAFE_MAX_DIM 以内，避免 OOM。"""
+        from PyQt5.QtGui import QImageReader
+        reader = QImageReader(file_path)
+        if not reader.canRead():
+            return QImage(file_path)  # 回退到原逻辑
+        size = reader.size()
+        if size.width() > self.IMAGE_SAFE_MAX_DIM or size.height() > self.IMAGE_SAFE_MAX_DIM:
+            # 等比缩到安全尺寸
+            scaled = size.scaled(self.IMAGE_SAFE_MAX_DIM, self.IMAGE_SAFE_MAX_DIM, Qt.KeepAspectRatio)
+            reader.setScaledSize(scaled)
+            image = QImage()
+            reader.read(image)
+            return image
+        return QImage(file_path)
+
     def _preview_image(self, file_path):
         try:
             self.preview_tab.hide()
             self.image_scroll_area.show()
-            image = QImage(file_path)
+            image = self._load_image_safe(file_path)
             if image.isNull():
                 self.preview_tab.show()
                 self.image_scroll_area.hide()
@@ -4113,6 +4134,7 @@ class MainWindow(QMainWindow):
             self.preview_tab.show()
             self.image_scroll_area.hide()
             self.preview_tab.setPlainText(f'图片预览错误: {str(e)}')
+
 
     def _preview_video(self, file_path):
         try:
@@ -4959,7 +4981,7 @@ class MainWindow(QMainWindow):
         dialog.setAttribute(Qt.WA_DeleteOnClose)
         dialog.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMaximizeButtonHint)
         dialog.setWindowTitle(f'图片查看 - {os.path.basename(path)}')
-        image = QImage(path)
+        image = self._load_image_safe(path)
         if image.isNull():
             return
         image_label = ZoomableImageLabel()
@@ -5142,6 +5164,11 @@ class MainWindow(QMainWindow):
             return None
     
     def keyPressEvent(self, event):
+        # 输入控件（搜索框、编辑框）获得焦点时，不拦截 Ctrl+C/V/Delete 等编辑快捷键
+        focus = self.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit)):
+            super().keyPressEvent(event)
+            return
         handled = True
         if event.key() == Qt.Key_F11:
             # 双保险：拦掉 F11，配合 changeEvent 阻全屏
