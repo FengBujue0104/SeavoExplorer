@@ -17,9 +17,10 @@ import subprocess
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-REPO = "15948707537/SeavoExplorer"
+REPO = "FengBujue0104/SeavoExplorer"
 EXE = "dist/SeavoExplorer.exe"
-APP_NAME = "SeavoExplorer"
+
+
 
 
 def run(cmd, check=True, capture=False):

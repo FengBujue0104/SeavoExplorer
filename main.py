@@ -42,9 +42,10 @@ _SPLASH_PIXMAP = None
 # 集中定义，扫描器与各定位/状态栏 helper 统一复用，避免命名规则调整时漏改。
 PROJECT_FOLDER_RE = re.compile(r'^([SM])(\d{3,4})(?:_(.*))?$')
 APP_VERSION = '0.4.2'
-GITHUB_REPO_URL = 'https://github.com/15948707537/SeavoExplorer/'
-GITHUB_RELEASES_URL = 'https://github.com/15948707537/SeavoExplorer/releases'
-GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/15948707537/SeavoExplorer/releases/latest'
+GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
+GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
+GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
+
 
 
 def _get_app_dir():
