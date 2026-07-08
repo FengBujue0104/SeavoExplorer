@@ -70,10 +70,10 @@ pyinstaller main.spec
 `main.spec` 当前输出名称为：
 
 ```text
-主板项目文件浏览器.exe
+SeavoExplorer.exe
 ```
 
-注意：辅助脚本 `build_onefile.py` / `build_onedir.py` 输出名称为 `SeavoExplorer`。如果要统一名称，请先确认目标发布命名后再同步修改脚本和 spec。
+辅助脚本 `build_onefile.py` / `build_onedir.py` 输出名称也为 `SeavoExplorer`，三者已统一。
 
 ## 打包内容说明
 
@@ -99,9 +99,8 @@ pyinstaller main.spec
 如需创建 GitHub Release，可使用：
 
 ```bash
-py release.py v0.2.0
-py release.py --build v0.2.0
-```
+py release.py v0.4.2
+py release.py --build v0.4.2
 
 `--build` 会先运行 `build_onefile.py`，然后发布 `dist/SeavoExplorer.exe`。
 
