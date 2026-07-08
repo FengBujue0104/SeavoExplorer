@@ -172,10 +172,6 @@ This project is Windows-specific in practice:
 - recycle-bin support uses Windows shell APIs via `ctypes`
 - 7-Zip detection assumes Windows install paths
 
-Packaging artifacts are not fully aligned:
+Packaging artifacts are aligned: all three build entry points (`build_onefile.py`, `build_onedir.py`, `main.spec`) produce `SeavoExplorer.exe`. `release.py` expects `dist/SeavoExplorer.exe` from the onefile build.
 
-- helper scripts produce `SeavoExplorer` outputs
-- `main.spec` names the executable `主板项目文件浏览器`
-- `make_ico.py` currently contains a hardcoded external path (`d:\Desktop\py-script\TRAE1`) rather than deriving from this repo
-
-If you touch packaging, verify which naming/path convention is intended before normalizing the scripts.
+If you touch packaging, verify the output name stays `SeavoExplorer` across all three entry points before committing.

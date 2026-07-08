@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='主板项目文件浏览器',
+    name='SeavoExplorer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
