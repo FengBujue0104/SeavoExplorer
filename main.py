@@ -3546,10 +3546,14 @@ class MainWindow(QMainWindow):
                 if f.startswith(base_name + '_' + today) and f.endswith(ext):
                     # 提取后缀部分：_YYYYMMDD 之后、.ext 之前
                     # 对于无扩展名文件(ext='')，直接使用日期后内容
+                    # 提取后缀：_YYYYMMDD 之后的部分
+                    # 注意：当 ext='' 时，f[:-0] 变成 f[:0]='' 导致无法提取后缀
+                    # 所以这里显式处理 ext 为空的情况
+                    suffix_start = len(base_name + '_' + today)
                     if ext:
-                        middle = f[len(base_name + '_' + today):-len(ext)]
+                        middle = f[suffix_start:-len(ext)]
                     else:
-                        middle = f[len(base_name + '_' + today):]
+                        middle = f[suffix_start:]
                     if middle == '' or (len(middle) == 1 and middle.isalpha()):
                         existing_suffixes.append(middle)
             # 确定下一个后缀：'' → a → b → c → ...
@@ -5166,6 +5170,7 @@ class MainWindow(QMainWindow):
         frames = []
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
+            cap.release()
             return None
         try:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
