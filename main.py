@@ -3343,12 +3343,14 @@ class MainWindow(QMainWindow):
         self._pending_preview_path = None
 
     def _execute_pending_preview(self):
-        """执行待处理的预览，如果路径仍然有效。"""
+        """执行待处理的预览，如果路径仍然有效且窗口未关闭。"""
         path = getattr(self, '_pending_preview_path', None)
         self._preview_timer = None
-        if path and os.path.exists(path):
+        # 窗口已关闭时不访问 GUI 对象
+        if self.isVisible() and path and os.path.exists(path):
             self.preview_file(path)
         self._pending_preview_path = None
+
 
     def _update_breadcrumb_for_item(self, file_path, file_info):
         """面包屑跟随：文件取其所在目录，目录取自身。"""
@@ -3885,16 +3887,18 @@ class MainWindow(QMainWindow):
             self.folder_stats_label.setText(f'{count} 个文件 · {self.format_file_size(size)}')
 
     def archive_to_old_folder(self, file_paths):
-        """将选中文件/文件夹移入同目录下的 old 文件夹（不存在则自动创建）。"""
+        """将选中文件/文件夹移入各自目录下的 old 文件夹。
+        支持跨目录多选，每个文件各自移入自己目录下的 old/。"""
         try:
             if not file_paths:
                 return
-            target_dir = os.path.join(os.path.dirname(file_paths[0]), 'old')
-            os.makedirs(target_dir, exist_ok=True)
             moved = 0
             for file_path in file_paths:
                 if not os.path.exists(file_path):
                     continue
+                parent_dir = os.path.dirname(file_path)
+                target_dir = os.path.join(parent_dir, 'old')
+                os.makedirs(target_dir, exist_ok=True)
                 dest = os.path.join(target_dir, os.path.basename(file_path))
                 # 重名时追加数字
                 if os.path.exists(dest):
