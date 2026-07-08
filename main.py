@@ -2493,8 +2493,10 @@ class MainWindow(QMainWindow):
             FOF_ALLOWUNDO = 0x0040
             FOF_NOCONFIRMATION = 0x0010
             FOF_SILENT = 0x0004
-
+            # 过滤路径中的空字符，避免 SHFileOperation 的 pFrom 字符串被截断
+            valid_paths = [p.replace('\x00', '') for p in valid_paths]
             p_from = '\x00'.join(valid_paths) + '\x00\x00'
+
 
             shfo = SHFILEOPSTRUCT()
             shfo.hwnd = int(self.winId())
@@ -4578,9 +4580,15 @@ class MainWindow(QMainWindow):
             progress.setLabelText(text)
 
         def download_completed(path):
+            # 校验文件大小是否匹配
+            if expected_size > 0:
+                actual_size = os.path.getsize(path)
+                if actual_size != expected_size:
+                    result['error'] = f'下载文件大小不匹配（期望 {expected_size}，实际 {actual_size}）'
+                    progress.accept()
+                    return
             result['path'] = path
             progress.accept()
-
         def download_failed(message):
             result['error'] = message
             progress.reject()
