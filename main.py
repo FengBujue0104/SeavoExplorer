@@ -78,10 +78,17 @@ PREVIEW_DOC_LINES = 50
 VIDEO_PREVIEW_POSITIONS = [0.1, 0.3, 0.5, 0.7, 0.9]
 
 # 按扩展名分类的可预览文件类型（preview_file 与 show_full_image 共用，避免两份手动同步）
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.svg')
+IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.svg', '.ico', '.jfif')
 VIDEO_EXTS = ('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm', '.mpg', '.mpeg', '.3gp')
 ARCHIVE_EXTS = ('.zip', '.rar', '.7z')
-TEXT_EXTS = ('.txt', '.csv', '.log', '.bom', '.drc', '.rep', '.rpt', '.md', '.json', '.xml', '.html', '.htm', '.ini', '.cfg')
+TEXT_EXTS = (
+    '.txt', '.csv', '.log', '.bom', '.drc', '.rep', '.rpt', '.md', '.json', '.xml',
+    '.html', '.htm', '.ini', '.cfg',
+    '.py', '.spec', '.toml', '.yaml', '.yml',
+)
+
+# 无扩展名的文本类 dotfile（os.path.splitext 无法提取扩展名，需按文件名匹配）
+TEXT_DOTFILES = {'.gitignore', '.dockerignore', '.editorconfig', '.env.example', '.gitattributes'}
 
 # 可分类开关的预览类别：(设置 key, 中文名)。顺序即「预览设置」对话框中的展示顺序。
 # 二进制兜底与加密类型不在此列（前者只读前1000字节，后者只显示提示，均无卡顿风险）。
@@ -4354,7 +4361,11 @@ class MainWindow(QMainWindow):
             self.preview_tab.show()
             self.image_scroll_area.hide()
 
-            if ext in text_exts:
+            # 无扩展名的 dotfile 按文件名匹配
+            base_name = os.path.basename(file_path)
+            if ext == '' and base_name in TEXT_DOTFILES:
+                self._preview_text(file_path)
+            elif ext in text_exts:
                 self._preview_text(file_path)
             elif ext == '.pdf':
                 self._preview_pdf(file_path)
