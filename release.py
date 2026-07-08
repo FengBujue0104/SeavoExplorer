@@ -5,8 +5,8 @@ SeavoExplorer 一键发布脚本
 
 用法：
     py release.py            # 交互式输入版本号
-    py release.py v0.2.0     # 直接指定版本号
-    py release.py --build v0.2.0   # 先运行打包再发布
+    py release.py v0.4.2     # 直接指定版本号
+    py release.py --build v0.4.2   # 先运行打包再发布
 
 依赖：已安装并登录 GitHub CLI（gh auth login），git 远程为 origin。
 """
@@ -96,7 +96,7 @@ def main():
     # 6. 确认版本号
     version = positional[0].strip() if positional else ""
     if not version:
-        version = input("\n请输入版本号（如 v0.2.0）：").strip()
+        version = input("\n请输入版本号（如 v0.4.2）：").strip()
     if not version:
         fail("未提供版本号。")
     if not version.startswith("v"):
