@@ -1,6 +1,6 @@
-# CLAUDE.md
+# OHMYPI.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to oh-my-pi when working with code in this repository.
 
 ## Overview
 
@@ -36,7 +36,7 @@ pyinstaller main.spec
 
 `build_onedir.py` builds a directory-based distribution in `dist/SeavoExplorer/`.
 
-`main.spec` builds a GUI executable named `主板项目文件浏览器` and includes the broader hidden-import list.
+`main.spec` builds a GUI executable named `SeavoExplorer.exe`.
 
 ### Release
 
@@ -48,24 +48,11 @@ py release.py --build v0.2.3   # run build_onefile.py first, then release
 py release.py                  # prompt for the version interactively
 ```
 
-The script checks `gh` is installed and authenticated, verifies `dist/SeavoExplorer.exe` exists, warns on a dirty working tree, refuses a duplicate tag, then creates an annotated tag, pushes the current branch and tag, and runs `gh release create` with the exe attached. Each step fails loudly instead of crashing silently — the original "闪退" was `gh release create` running with no tag present. Before publishing a new version, update `APP_VERSION`, About/help text, README/release notes, and verify the generated exe path still matches `EXE`. Keep `REPO`/`EXE` constants in sync if the repo or output name changes.
+The script checks `gh` is installed and authenticated, verifies `dist/SeavoExplorer.exe` exists, warns on a dirty working tree, refuses a duplicate tag, then creates an annotated tag, pushes the current branch and tag, and runs `gh release create` with the exe attached. Each step fails loudly instead of crashing silently. Before publishing a new version, update `APP_VERSION`, About/help text, README/release notes, and verify the generated exe path still matches `EXE`. Keep `REPO`/`EXE` constants in sync if the repo or output name changes.
 
 ### Tests / lint
 
 There is currently no test suite or lint configuration in this repository. Do not invent commands for them in future edits unless those tools are added to the repo.
-
-### Tool-use notes
-
-- When reading normal text/code files with the Read tool, omit optional PDF-only parameters such as `pages`; never pass empty optional values like `pages: ""`. Use `pages` only for PDF files and only with a valid page range such as `"1"` or `"1-5"`.
-
-## Model assignment convention
-
-This is a soft convention for which model tier to use per task type. The main conversation loop's model is set by the user (`/model`, `/fast`) and cannot self-switch; this only governs which `model` to specify when spawning `Agent`/`Workflow` subagents.
-
-- Keep the **main loop on Opus** for: core `main.py` changes (scan, preview, archive, file ops), cross-feature refactors, code review, and any Windows-specific logic (`safe_write_json`, frozen `app_dir` branch, recycle-bin `ctypes`, 7-Zip detection). Coupling is high in this monolith, so correctness wins over token cost.
-- Spawn **Sonnet subagents** for mechanical, low-risk work with clear rules: aligning the three packaging configs (`build_onefile.py` / `build_onedir.py` / `main.spec`), `release.py` constant/version bumps, and doc/README/comment writing.
-- Spawn **Explore subagents with a small model (Sonnet/Haiku)** for pure search/locate tasks where only the conclusion is needed.
-- When a Sonnet subagent touches the packaging configs, instruct it to read all three files before editing — they drift easily and a partial edit looks complete.
 
 ## Architecture
 
@@ -152,7 +139,7 @@ Archive support is split by format:
 2. `7z.exe` beside the app/script
 3. standard Windows install locations under `C:\Program Files` and `C:\Program Files (x86)`
 
-The “smart extract” feature inspects top-level archive contents first: single top-level item extracts into the current directory; multiple top-level items extract into a newly created folder named after the archive.
+The "smart extract" feature inspects top-level archive contents first: single top-level item extracts into the current directory; multiple top-level items extract into a newly created folder named after the archive.
 
 ### New project / folder structure workflow
 

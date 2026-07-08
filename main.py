@@ -1884,7 +1884,7 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu('文件')
         file_menu.addAction('新建项目', self.new_project)
         file_menu.addAction('新建文件夹内部结构', self.new_folder_structure)
-        file_menu.addAction('刷新(快捷键F5)', self.load_filtered_folders)
+        file_menu.addAction('刷新(快捷键F5)', self.refresh_all)
         file_menu.addAction('退出', self.close)
         settings_menu = menubar.addMenu('设置')
         settings_menu.addAction('项目文件夹设置', self.show_settings_dialog)
@@ -2767,6 +2767,19 @@ class MainWindow(QMainWindow):
         """同步加载过滤后的文件夹（保留接口兼容）"""
         self.load_filtered_folders_async()
     
+
+    def refresh_all(self):
+        """刷新项目列表和文件树（菜单/F5 共用）。"""
+        self.load_filtered_folders()
+        if not self.current_folder:
+            return
+        # 强制 QFileSystemModel 释放并重新获取目录句柄：先切到根目录，泵事件，再切回
+        self.file_model.setRootPath(QDir().rootPath())
+        QApplication.processEvents()
+        self.file_model.setRootPath(self.current_folder)
+        self.file_tree.setRootIndex(self.file_model.index(self.current_folder))
+        QApplication.processEvents()
+        self.file_tree.collapseAll()
     def filter_folders(self, text):
         for row in range(self.motherboard_table.rowCount()):
             number = self.motherboard_table.item(row, 0).text()
@@ -5043,10 +5056,7 @@ class MainWindow(QMainWindow):
             # 双保险：拦掉 F11，配合 changeEvent 阻全屏
             event.accept()
         elif event.key() == Qt.Key_F5:
-            self.load_filtered_folders()
-            if self.current_folder:
-                self.file_model.setRootPath(self.current_folder)
-                self.file_tree.setRootIndex(self.file_model.index(self.current_folder))
+            self.refresh_all()
         elif event.key() == Qt.Key_F2:
             selected_paths = self._get_selected_file_paths()
             if len(selected_paths) == 1:
