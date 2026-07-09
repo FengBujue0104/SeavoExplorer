@@ -45,13 +45,41 @@ DEFAULT_DB_RE_TEXT = r'^M(\d{3,4})(?:_(.*))?$'
 DEFAULT_MB_RE = re.compile(DEFAULT_MB_RE_TEXT)
 DEFAULT_DB_RE = re.compile(DEFAULT_DB_RE_TEXT)
 
+def _is_regex_safe(pattern):
+    """检查正则是否存在 ReDoS（灾难性回溯）风险。
+
+    简单启发式：编译后测试一个中等长度字符串，如果匹配时间过长或抛出 RuntimeError，
+    视为不安全。返回 (is_safe, error_message)。
+    """
+    import time
+    try:
+        compiled = re.compile(pattern)
+    except re.error as e:
+        return False, str(e)
+    # 测试用例：50 个字符的字符串，模拟最坏情况
+    test_str = 'A' * 50
+    start = time.monotonic()
+    try:
+        compiled.search(test_str)
+        elapsed = time.monotonic() - start
+        if elapsed > 0.5:  # 超过 500ms 视为有风险
+            return False, f'正则匹配耗时过长 ({elapsed:.2f}s)，可能存在回溯风险'
+        return True, ''
+    except RuntimeError:
+        return False, '正则匹配触发递归限制'
+
 def _resolve_regex(state, custom_text, default_re):
     """根据 state 返回 (re.Pattern, is_fallback)。state 为 custom 时尝试编译 custom_text，失败时兜底到默认正则。"""
     if state == "custom":
         try:
-            return re.compile(custom_text), False
+            compiled = re.compile(custom_text)
         except re.error:
             return default_re, True
+        # ReDoS 安全检查
+        is_safe, err_msg = _is_regex_safe(custom_text)
+        if not is_safe:
+            return default_re, True
+        return compiled, False
     return default_re, False
 APP_VERSION = '0.4.2'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
@@ -1267,7 +1295,7 @@ class SettingsDialog(_ReorderableTableDialog):
         self.show_hidden_checkbox.setChecked(self.show_hidden)
         
         # --- 正则设置区域 ---
-        regex_group = QGroupBox('项目文件夹命名规则')
+        regex_group = QGroupBox('项目文件夹命名规则（第1组=编号，第2组=注释）')
         regex_layout = QVBoxLayout()
         
         self.regex_default_rb = QRadioButton('默认 (主板 S + 编号, 子卡 M + 编号)')
@@ -1352,7 +1380,7 @@ class SettingsDialog(_ReorderableTableDialog):
         self._test_regex()
 
     def _test_regex(self):
-        """实时验证两个自定义正则并更新状态标签。"""
+        """实时验证两个自定义正则并更新状态标签（含 ReDoS 安全检查）。"""
         if self.regex_state == 'default':
             self.regex_status_label.setText(f'✅ 使用默认：主板 {DEFAULT_MB_RE_TEXT}，子卡 {DEFAULT_DB_RE_TEXT}')
             self.regex_status_label.setStyleSheet('color: #27ae60;')
@@ -1362,16 +1390,26 @@ class SettingsDialog(_ReorderableTableDialog):
         errors = []
         if not mb_text:
             errors.append('主板正则不能为空')
-        try:
-            re.compile(mb_text)
-        except re.error as e:
-            errors.append(f'主板正则无效: {e}')
+        else:
+            try:
+                re.compile(mb_text)
+            except re.error as e:
+                errors.append(f'主板正则无效: {e}')
+            else:
+                is_safe, err = _is_regex_safe(mb_text)
+                if not is_safe:
+                    errors.append(f'主板正则风险: {err}')
         if not db_text:
             errors.append('子卡正则不能为空')
-        try:
-            re.compile(db_text)
-        except re.error as e:
-            errors.append(f'子卡正则无效: {e}')
+        else:
+            try:
+                re.compile(db_text)
+            except re.error as e:
+                errors.append(f'子卡正则无效: {e}')
+            else:
+                is_safe, err = _is_regex_safe(db_text)
+                if not is_safe:
+                    errors.append(f'子卡正则风险: {err}')
         if errors:
             self.regex_status_label.setText('❌ ' + '; '.join(errors) + '（保存后将回退到默认）')
             self.regex_status_label.setStyleSheet('color: #c0392b;')
