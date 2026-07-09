@@ -96,6 +96,30 @@ def _get_app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _is_file_locked(path):
+    """检查文件是否被其他进程占用（Windows）。"""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, 'rb'):
+            return False
+    except (IOError, PermissionError, OSError):
+        return True
+
+def _check_running_exe_blocked(self, target_path, action_name):
+    """检查目标路径是否正在运行的 exe，是则提示用户并返回 True。"""
+    exe_path = getattr(self, '_exe_path', None)
+    if exe_path and os.path.exists(exe_path):
+        try:
+            if os.path.realpath(target_path) == os.path.realpath(exe_path) or (
+                os.path.isdir(target_path) and os.path.realpath(exe_path).startswith(os.path.realpath(target_path))
+            ):
+                QMessageBox.warning(self, '警告', f'{action_name}目标包含正在运行的程序，请先关闭后再试')
+                return True
+        except Exception:
+            pass
+    return False
+
 def _decode_zip_name(raw):
     """解码 zip 条目名：旧式 zip 用 cp437 存中文名，依次尝试 gbk、utf-8 还原，都失败则用原值。"""
     for enc in ('gbk', 'utf-8'):
@@ -594,6 +618,9 @@ class UpdateDownloadThread(QThread):
                     os.chmod(self.save_path, 0o666)
                 except OSError:
                     pass
+            # Windows 不允许覆盖正在运行的 exe
+            if self.save_path.lower().endswith('.exe') and self._is_file_locked(self.save_path):
+                raise OSError(f'{self.save_path} 正在被使用，请关闭程序后重试')
             os.replace(self.part_path, self.save_path)
             self.progress_changed.emit(downloaded, total, 0.0, -1, resumed, attempt)
             self.download_completed.emit(self.save_path)
@@ -3983,6 +4010,9 @@ class MainWindow(QMainWindow):
     def smart_extract(self, archive_path):
         """智能解压：单文件/单文件夹直接解压，多文件则创建同名文件夹"""
         try:
+            # 检查是否尝试解压到正在运行的 exe
+            if self._check_running_exe_blocked(archive_path, '解压'):
+                return
             ext = os.path.splitext(archive_path)[1].lower()
             parent_dir = os.path.dirname(archive_path)
             archive_name = os.path.splitext(os.path.basename(archive_path))[0]
