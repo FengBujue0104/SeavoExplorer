@@ -626,6 +626,7 @@ class FolderScanThread(QThread):
         self.include_subfolders = include_subfolders
         self.comments = comments
         self.sort_by_number = sort_by_number
+        # 线程安全：在创建时快照正则，不在运行中读共享状态
         self._mb_regex = mb_regex or DEFAULT_MB_RE
         self._db_regex = db_regex or DEFAULT_DB_RE
 
@@ -1322,8 +1323,6 @@ class SettingsDialog(_ReorderableTableDialog):
         self.setLayout(layout)
         
         # 初始化 UI 状态
-        self.regex_custom_rb.clicked.connect(lambda: self._on_regex_mode_changed('custom'))
-        self.regex_default_rb.clicked.connect(lambda: self._on_regex_mode_changed('default'))
         self._refresh_regex_ui()
         
     def _refresh_regex_ui(self):
@@ -1337,6 +1336,10 @@ class SettingsDialog(_ReorderableTableDialog):
         self.regex_db_edit.setEnabled(is_custom)
         self.regex_test_btn.setEnabled(is_custom)
         self._test_regex()
+
+    def _on_regex_mode_changed(self, state):
+        self.regex_state = state
+        self._refresh_regex_ui()
 
     def _test_regex(self):
         """实时验证两个自定义正则并更新状态标签。"""
@@ -1364,58 +1367,6 @@ class SettingsDialog(_ReorderableTableDialog):
             self.regex_status_label.setStyleSheet('color: #c0392b;')
         else:
             self.regex_status_label.setText(f'✅ 主板: {mb_text}  |  子卡: {db_text}')
-            self.regex_status_label.setStyleSheet('color: #27ae60;')
-
-    def _refresh_regex_ui(self):
-        is_custom = self.regex_state == 'custom'
-        self.regex_custom_rb.setChecked(is_custom)
-        self.regex_default_rb.setChecked(not is_custom)
-        self.regex_mb_edit.setText(self.custom_mb_regex if is_custom and self.custom_mb_regex else DEFAULT_MB_RE_TEXT)
-        self.regex_db_edit.setText(self.custom_db_regex if is_custom and self.custom_db_regex else DEFAULT_DB_RE_TEXT)
-        self.regex_mb_edit.setEnabled(is_custom)
-        self.regex_db_edit.setEnabled(is_custom)
-        self.regex_test_btn.setEnabled(is_custom)
-        self._on_regex_test()
-
-    def _on_regex_mode_changed(self, state):
-        self.regex_state = state
-        self._refresh_regex_ui()
-
-    def _on_regex_test(self):
-        if self.regex_state == 'default':
-            self.regex_status_label.setText(f'✅ 默认: {DEFAULT_MB_RE_TEXT}, {DEFAULT_DB_RE_TEXT}')
-            self.regex_status_label.setStyleSheet('color: #27ae60;')
-            return
-        mb = self.regex_mb_edit.text().strip()
-        db = self.regex_db_edit.text().strip()
-        errors = []
-        if not mb:
-            errors.append('主板正则不能为空')
-        else:
-            try:
-                re.compile(mb)
-            except re.error as e:
-                errors.append(f'主板无效: {e}')
-            else:
-                ok, err = _is_regex_safe(mb)
-                if not ok:
-                    errors.append(f'主板风险: {err}')
-        if not db:
-            errors.append('子卡正则不能为空')
-        else:
-            try:
-                re.compile(db)
-            except re.error as e:
-                errors.append(f'子卡无效: {e}')
-            else:
-                ok, err = _is_regex_safe(db)
-                if not ok:
-                    errors.append(f'子卡风险: {err}')
-        if errors:
-            self.regex_status_label.setText('❌ ' + '; '.join(errors) + '（保存后回退到默认）')
-            self.regex_status_label.setStyleSheet('color: #c0392b;')
-        else:
-            self.regex_status_label.setText(f'✅ 主板: {mb}  |  子卡: {db}')
             self.regex_status_label.setStyleSheet('color: #27ae60;')
 
     def add_path(self):
@@ -1452,8 +1403,6 @@ class SettingsDialog(_ReorderableTableDialog):
         
     def get_settings(self):
         return self.paths, self.include_subfolders, self.sort_by_number, self.show_hidden, self.regex_state, self.custom_mb_regex, self.custom_db_regex
-
-
 
 class QuickAccessSettingsDialog(_ReorderableTableDialog):
     def __init__(self, current_paths, parent=None):
@@ -1766,17 +1715,6 @@ class MainWindow(QMainWindow):
         if not getattr(self, 'wizard_shown', False):
             QTimer.singleShot(0, self.show_wizard)
 
-    def _refresh_regex_status(self):
-        if getattr(self, 'regex_state', 'default') == 'default':
-            self.regex_status_label.setText('正则: 默认')
-            self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
-        elif getattr(self, '_regex_fallback', False):
-            self.regex_status_label.setText('正则: ⚠ 回退')
-            self.regex_status_label.setStyleSheet('color: #c0392b; padding: 0 8px;')
-        else:
-            self.regex_status_label.setText('正则: 自定义')
-            self.regex_status_label.setStyleSheet('color: #27ae60; padding: 0 8px;')
-
     def _show_pending_load_warnings(self):
         if self._pending_load_warnings:
             QMessageBox.warning(self, '提示', '\n'.join(self._pending_load_warnings))
@@ -1978,10 +1916,6 @@ class MainWindow(QMainWindow):
         self.folder_stats_label = QLabel('')
         self.folder_stats_label.setStyleSheet('color: #555; padding: 0 8px;')
         self.statusBar().addPermanentWidget(self.folder_stats_label)
-        self.regex_status_label = QLabel('')
-        self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
-        self.statusBar().addPermanentWidget(self.regex_status_label)
-        self._refresh_regex_status()
         # 在状态栏右侧添加回收站按钮
         self.statusBar().addPermanentWidget(self._create_recycle_btn())
 
@@ -2179,9 +2113,6 @@ class MainWindow(QMainWindow):
             self.regex_state = config_data.get('regex_state', 'default')
             self.custom_mb_regex = config_data.get('custom_mb_regex', '')
             self.custom_db_regex = config_data.get('custom_db_regex', '')
-            self.regex_state = config_data.get('regex_state', 'default')
-            self.custom_mb_regex = config_data.get('custom_mb_regex', '')
-            self.custom_db_regex = config_data.get('custom_db_regex', '')
             for key, _name in PREVIEW_CATEGORIES:
                 cfg_key = f'preview_{key}_enabled'
                 if cfg_key in config_data:
@@ -2249,9 +2180,6 @@ class MainWindow(QMainWindow):
                 'hidden_folders': getattr(self, 'hidden_folders', []),
                 'wizard_shown': getattr(self, 'wizard_shown', False),
                 'show_hidden': getattr(self, 'show_hidden', False),
-                'regex_state': getattr(self, 'regex_state', 'default'),
-                'custom_mb_regex': getattr(self, 'custom_mb_regex', ''),
-                'custom_db_regex': getattr(self, 'custom_db_regex', ''),
                 'regex_state': getattr(self, 'regex_state', 'default'),
                 'custom_mb_regex': getattr(self, 'custom_mb_regex', ''),
                 'custom_db_regex': getattr(self, 'custom_db_regex', '')
