@@ -1295,6 +1295,8 @@ class SettingsDialog(_ReorderableTableDialog):
         test_row = QHBoxLayout()
         self.regex_test_btn = QPushButton('测试')
         self.regex_test_btn.clicked.connect(self._test_regex)
+        self.regex_default_rb.toggled.connect(self._on_regex_mode_changed)
+        self.regex_custom_rb.toggled.connect(self._on_regex_mode_changed)
         test_row.addWidget(self.regex_test_btn)
         test_row.addStretch()
         regex_layout.addLayout(test_row)
@@ -1322,6 +1324,11 @@ class SettingsDialog(_ReorderableTableDialog):
         # 初始化 UI 状态
         self._refresh_regex_ui()
         
+    def _on_regex_mode_changed(self):
+        """Radio button 切换时同步 regex_state 并刷新 UI。"""
+        self.regex_state = 'custom' if self.regex_custom_rb.isChecked() else 'default'
+        self._refresh_regex_ui()
+
     def _refresh_regex_ui(self):
         """根据 self.regex_state 同步 UI 状态和编辑框内容。"""
         is_custom = self.regex_state == 'custom'
