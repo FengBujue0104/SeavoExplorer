@@ -26,3 +26,6 @@ seavo_comments.json
 .claude/
 patch*.py
 archive_fix.txt
+
+# Local-only files (not committed to GitHub)
+OHMYPI.md

@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.8"
 authors = [
-    { name = "FengBujue0104", email = "15948707537@163.com" },
+    { name = "FengBujue0104" },
 ]
 keywords = ["pyqt5", "file-browser", "pcb", "hardware", "s-m-projects"]
 classifiers = [
