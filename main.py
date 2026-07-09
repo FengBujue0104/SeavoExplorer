@@ -45,42 +45,13 @@ DEFAULT_DB_RE_TEXT = r'^M(\d{3,4})(?:_(.*))?$'
 DEFAULT_MB_RE = re.compile(DEFAULT_MB_RE_TEXT)
 DEFAULT_DB_RE = re.compile(DEFAULT_DB_RE_TEXT)
 
-def _is_regex_safe(pattern):
-    """检查正则是否存在 ReDoS（灾难性回溯）风险。
-
-    简单启发式：编译后测试多种字符的最坏情况字符串，如果匹配时间过长或抛出 RuntimeError，
-    视为不安全。返回 (is_safe, error_message)。
-    """
-    import time
-    try:
-        compiled = re.compile(pattern)
-    except re.error as e:
-        return False, str(e)
-    # 测试用例：多种字符组合的最坏情况字符串
-    test_cases = ['A' * 50, 'a' * 50, '1' * 50, '_' * 50, 'S' * 50, 'M' * 50, '0' * 50]
-    for test_str in test_cases:
-        start = time.monotonic()
-        try:
-            compiled.search(test_str)
-            elapsed = time.monotonic() - start
-            if elapsed > 0.5:  # 超过 500ms 视为有风险
-                return False, f'正则匹配耗时过长 ({elapsed:.2f}s)，可能存在回溯风险'
-        except RuntimeError:
-            return False, '正则匹配触发递归限制'
-    return True, ''
-
 def _resolve_regex(state, custom_text, default_re):
     """根据 state 返回 (re.Pattern, is_fallback)。state 为 custom 时尝试编译 custom_text，失败时兜底到默认正则。"""
     if state == "custom":
         try:
-            compiled = re.compile(custom_text)
+            return re.compile(custom_text), False
         except re.error:
             return default_re, True
-        # ReDoS 安全检查
-        is_safe, err_msg = _is_regex_safe(custom_text)
-        if not is_safe:
-            return default_re, True
-        return compiled, False
     return default_re, False
 APP_VERSION = '0.4.2'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
@@ -95,30 +66,6 @@ def _get_app_dir():
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
-
-def _is_file_locked(path):
-    """检查文件是否被其他进程占用（Windows）。"""
-    if not os.path.exists(path):
-        return False
-    try:
-        with open(path, 'rb'):
-            return False
-    except (IOError, PermissionError, OSError):
-        return True
-
-def _check_running_exe_blocked(self, target_path, action_name):
-    """检查目标路径是否正在运行的 exe，是则提示用户并返回 True。"""
-    exe_path = getattr(self, '_exe_path', None)
-    if exe_path and os.path.exists(exe_path):
-        try:
-            if os.path.realpath(target_path) == os.path.realpath(exe_path) or (
-                os.path.isdir(target_path) and os.path.realpath(exe_path).startswith(os.path.realpath(target_path))
-            ):
-                QMessageBox.warning(self, '警告', f'{action_name}目标包含正在运行的程序，请先关闭后再试')
-                return True
-        except Exception:
-            pass
-    return False
 
 def _decode_zip_name(raw):
     """解码 zip 条目名：旧式 zip 用 cp437 存中文名，依次尝试 gbk、utf-8 还原，都失败则用原值。"""
@@ -618,9 +565,6 @@ class UpdateDownloadThread(QThread):
                     os.chmod(self.save_path, 0o666)
                 except OSError:
                     pass
-            # Windows 不允许覆盖正在运行的 exe
-            if self.save_path.lower().endswith('.exe') and self._is_file_locked(self.save_path):
-                raise OSError(f'{self.save_path} 正在被使用，请关闭程序后重试')
             os.replace(self.part_path, self.save_path)
             self.progress_changed.emit(downloaded, total, 0.0, -1, resumed, attempt)
             self.download_completed.emit(self.save_path)
@@ -673,13 +617,15 @@ class FolderScanThread(QThread):
     scan_started = pyqtSignal()
     scan_progress = pyqtSignal(str)  # 发射当前扫描的目录
     
+    MAX_FILES = 50000
+    MAX_MATCHES_WARNING = 500
+
     def __init__(self, settings, include_subfolders, comments, sort_by_number=False, mb_regex=None, db_regex=None):
         super().__init__()
         self.settings = settings
         self.include_subfolders = include_subfolders
         self.comments = comments
         self.sort_by_number = sort_by_number
-        # 线程安全：在创建时快照正则，不在运行中读共享状态
         self._mb_regex = mb_regex or DEFAULT_MB_RE
         self._db_regex = db_regex or DEFAULT_DB_RE
 
@@ -699,14 +645,12 @@ class FolderScanThread(QThread):
                     db_match = self._db_regex.match(item)
                     if mb_match:
                         number = mb_match.group(1)
-                        groups = mb_match.groups()
-                        folder_comment = groups[1] if len(groups) > 1 and groups[1] else ''
+                        folder_comment = mb_match.group(2) if mb_match.group(2) else ''
                         internal_comment = self.comments.get(item_path, folder_comment)
                         motherboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
                     if db_match:
                         number = db_match.group(1)
-                        groups = db_match.groups()
-                        folder_comment = groups[1] if len(groups) > 1 and groups[1] else ''
+                        folder_comment = db_match.group(2) if db_match.group(2) else ''
                         internal_comment = self.comments.get(item_path, folder_comment)
                         daughterboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
                     if self.include_subfolders:
@@ -735,9 +679,6 @@ class FolderScanThread(QThread):
             motherboard_folders.sort(key=lambda x: (dir_order.get(x[4], 999), x[0]))
             daughterboard_folders.sort(key=lambda x: (dir_order.get(x[4], 999), x[0]))
         if not self.isInterruptionRequested():
-            total_matches = len(motherboard_folders) + len(daughterboard_folders)
-            if total_matches > self.MAX_MATCHES_WARNING:
-                self.scan_progress.emit(f'⚠ 匹配到 {total_matches} 个项目，正则可能过于宽松')
             self.scan_completed.emit(motherboard_folders, daughterboard_folders)
 
 
@@ -746,7 +687,6 @@ class FolderStatsThread(QThread):
     stats_ready = pyqtSignal(int, int, int, bool)  # (token, file_count, total_size, truncated)
 
     MAX_FILES = 50000  # 软上限：超过即停，UI 显示 50000+
-    MAX_MATCHES_WARNING = 500  # 单次扫描匹配超过此数量时警告（可能正则过于宽松）
 
     def __init__(self, root, token):
         super().__init__()
@@ -1329,7 +1269,7 @@ class SettingsDialog(_ReorderableTableDialog):
         self.show_hidden_checkbox.setChecked(self.show_hidden)
         
         # --- 正则设置区域 ---
-        regex_group = QGroupBox('项目文件夹命名规则（第1组=编号，第2组=注释）')
+        regex_group = QGroupBox('项目文件夹命名规则')
         regex_layout = QVBoxLayout()
         
         self.regex_default_rb = QRadioButton('默认 (主板 S + 编号, 子卡 M + 编号)')
@@ -1357,8 +1297,6 @@ class SettingsDialog(_ReorderableTableDialog):
         test_row = QHBoxLayout()
         self.regex_test_btn = QPushButton('测试')
         self.regex_test_btn.clicked.connect(self._test_regex)
-        self.regex_custom_rb.clicked.connect(lambda: self._on_regex_mode_changed('custom'))
-        self.regex_default_rb.clicked.connect(lambda: self._on_regex_mode_changed('default'))
         test_row.addWidget(self.regex_test_btn)
         test_row.addStretch()
         regex_layout.addLayout(test_row)
@@ -1384,37 +1322,24 @@ class SettingsDialog(_ReorderableTableDialog):
         self.setLayout(layout)
         
         # 初始化 UI 状态
+        self.regex_custom_rb.clicked.connect(lambda: self._on_regex_mode_changed('custom'))
+        self.regex_default_rb.clicked.connect(lambda: self._on_regex_mode_changed('default'))
         self._refresh_regex_ui()
         
-    def _on_regex_mode_changed(self, state):
-        """Radio button 切换时同步 regex_state 并刷新 UI。
-        
-        state: 'custom' 或 'default'，由调用者直接传入，避免 toggled 双重信号导致状态覆盖。
-        """
-        self.regex_state = state
-        self._refresh_regex_ui()
-
     def _refresh_regex_ui(self):
-        """根据 self.regex_state 同步 UI 状态和编辑框内容。
-
-        自定义模式下如果用户从未配置过（字段为空），预填默认正则作为编辑起点，
-        避免编辑框完全空白导致用户无从下手。
-        """
+        """根据 self.regex_state 同步 UI 状态和编辑框内容。"""
         is_custom = self.regex_state == 'custom'
         self.regex_custom_rb.setChecked(is_custom)
         self.regex_default_rb.setChecked(not is_custom)
-        # 主板正则：自定义模式下若用户未填过，预填默认值作为起点
-        mb_text = self.custom_mb_regex if is_custom and self.custom_mb_regex else DEFAULT_MB_RE_TEXT
-        db_text = self.custom_db_regex if is_custom and self.custom_db_regex else DEFAULT_DB_RE_TEXT
-        self.regex_mb_edit.setText(mb_text)
-        self.regex_db_edit.setText(db_text)
+        self.regex_mb_edit.setText(self.custom_mb_regex if is_custom else DEFAULT_MB_RE_TEXT)
+        self.regex_db_edit.setText(self.custom_db_regex if is_custom else DEFAULT_DB_RE_TEXT)
         self.regex_mb_edit.setEnabled(is_custom)
         self.regex_db_edit.setEnabled(is_custom)
         self.regex_test_btn.setEnabled(is_custom)
         self._test_regex()
 
     def _test_regex(self):
-        """实时验证两个自定义正则并更新状态标签（含 ReDoS 安全检查）。"""
+        """实时验证两个自定义正则并更新状态标签。"""
         if self.regex_state == 'default':
             self.regex_status_label.setText(f'✅ 使用默认：主板 {DEFAULT_MB_RE_TEXT}，子卡 {DEFAULT_DB_RE_TEXT}')
             self.regex_status_label.setStyleSheet('color: #27ae60;')
@@ -1424,31 +1349,73 @@ class SettingsDialog(_ReorderableTableDialog):
         errors = []
         if not mb_text:
             errors.append('主板正则不能为空')
-        else:
-            try:
-                re.compile(mb_text)
-            except re.error as e:
-                errors.append(f'主板正则无效: {e}')
-            else:
-                is_safe, err = _is_regex_safe(mb_text)
-                if not is_safe:
-                    errors.append(f'主板正则风险: {err}')
+        try:
+            re.compile(mb_text)
+        except re.error as e:
+            errors.append(f'主板正则无效: {e}')
         if not db_text:
             errors.append('子卡正则不能为空')
-        else:
-            try:
-                re.compile(db_text)
-            except re.error as e:
-                errors.append(f'子卡正则无效: {e}')
-            else:
-                is_safe, err = _is_regex_safe(db_text)
-                if not is_safe:
-                    errors.append(f'子卡正则风险: {err}')
+        try:
+            re.compile(db_text)
+        except re.error as e:
+            errors.append(f'子卡正则无效: {e}')
         if errors:
             self.regex_status_label.setText('❌ ' + '; '.join(errors) + '（保存后将回退到默认）')
             self.regex_status_label.setStyleSheet('color: #c0392b;')
         else:
             self.regex_status_label.setText(f'✅ 主板: {mb_text}  |  子卡: {db_text}')
+            self.regex_status_label.setStyleSheet('color: #27ae60;')
+
+    def _refresh_regex_ui(self):
+        is_custom = self.regex_state == 'custom'
+        self.regex_custom_rb.setChecked(is_custom)
+        self.regex_default_rb.setChecked(not is_custom)
+        self.regex_mb_edit.setText(self.custom_mb_regex if is_custom and self.custom_mb_regex else DEFAULT_MB_RE_TEXT)
+        self.regex_db_edit.setText(self.custom_db_regex if is_custom and self.custom_db_regex else DEFAULT_DB_RE_TEXT)
+        self.regex_mb_edit.setEnabled(is_custom)
+        self.regex_db_edit.setEnabled(is_custom)
+        self.regex_test_btn.setEnabled(is_custom)
+        self._on_regex_test()
+
+    def _on_regex_mode_changed(self, state):
+        self.regex_state = state
+        self._refresh_regex_ui()
+
+    def _on_regex_test(self):
+        if self.regex_state == 'default':
+            self.regex_status_label.setText(f'✅ 默认: {DEFAULT_MB_RE_TEXT}, {DEFAULT_DB_RE_TEXT}')
+            self.regex_status_label.setStyleSheet('color: #27ae60;')
+            return
+        mb = self.regex_mb_edit.text().strip()
+        db = self.regex_db_edit.text().strip()
+        errors = []
+        if not mb:
+            errors.append('主板正则不能为空')
+        else:
+            try:
+                re.compile(mb)
+            except re.error as e:
+                errors.append(f'主板无效: {e}')
+            else:
+                ok, err = _is_regex_safe(mb)
+                if not ok:
+                    errors.append(f'主板风险: {err}')
+        if not db:
+            errors.append('子卡正则不能为空')
+        else:
+            try:
+                re.compile(db)
+            except re.error as e:
+                errors.append(f'子卡无效: {e}')
+            else:
+                ok, err = _is_regex_safe(db)
+                if not ok:
+                    errors.append(f'子卡风险: {err}')
+        if errors:
+            self.regex_status_label.setText('❌ ' + '; '.join(errors) + '（保存后回退到默认）')
+            self.regex_status_label.setStyleSheet('color: #c0392b;')
+        else:
+            self.regex_status_label.setText(f'✅ 主板: {mb}  |  子卡: {db}')
             self.regex_status_label.setStyleSheet('color: #27ae60;')
 
     def add_path(self):
@@ -1799,6 +1766,17 @@ class MainWindow(QMainWindow):
         if not getattr(self, 'wizard_shown', False):
             QTimer.singleShot(0, self.show_wizard)
 
+    def _refresh_regex_status(self):
+        if getattr(self, 'regex_state', 'default') == 'default':
+            self.regex_status_label.setText('正则: 默认')
+            self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
+        elif getattr(self, '_regex_fallback', False):
+            self.regex_status_label.setText('正则: ⚠ 回退')
+            self.regex_status_label.setStyleSheet('color: #c0392b; padding: 0 8px;')
+        else:
+            self.regex_status_label.setText('正则: 自定义')
+            self.regex_status_label.setStyleSheet('color: #27ae60; padding: 0 8px;')
+
     def _show_pending_load_warnings(self):
         if self._pending_load_warnings:
             QMessageBox.warning(self, '提示', '\n'.join(self._pending_load_warnings))
@@ -2000,7 +1978,6 @@ class MainWindow(QMainWindow):
         self.folder_stats_label = QLabel('')
         self.folder_stats_label.setStyleSheet('color: #555; padding: 0 8px;')
         self.statusBar().addPermanentWidget(self.folder_stats_label)
-        # 正则状态标签（显示当前匹配规则，fallback 时变红）
         self.regex_status_label = QLabel('')
         self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
         self.statusBar().addPermanentWidget(self.regex_status_label)
@@ -2110,8 +2087,6 @@ class MainWindow(QMainWindow):
         self.regex_state = 'default'
         self.custom_mb_regex = ''
         self.custom_db_regex = ''
-        self.folder_regex_mb = DEFAULT_MB_RE
-        self.folder_regex_db = DEFAULT_DB_RE
         self.wizard_shown = False
         for key, _name in PREVIEW_CATEGORIES:
             # 视频预览默认关闭(需手动开启),避免无 OpenCV 时卡顿
@@ -2204,6 +2179,9 @@ class MainWindow(QMainWindow):
             self.regex_state = config_data.get('regex_state', 'default')
             self.custom_mb_regex = config_data.get('custom_mb_regex', '')
             self.custom_db_regex = config_data.get('custom_db_regex', '')
+            self.regex_state = config_data.get('regex_state', 'default')
+            self.custom_mb_regex = config_data.get('custom_mb_regex', '')
+            self.custom_db_regex = config_data.get('custom_db_regex', '')
             for key, _name in PREVIEW_CATEGORIES:
                 cfg_key = f'preview_{key}_enabled'
                 if cfg_key in config_data:
@@ -2271,6 +2249,9 @@ class MainWindow(QMainWindow):
                 'hidden_folders': getattr(self, 'hidden_folders', []),
                 'wizard_shown': getattr(self, 'wizard_shown', False),
                 'show_hidden': getattr(self, 'show_hidden', False),
+                'regex_state': getattr(self, 'regex_state', 'default'),
+                'custom_mb_regex': getattr(self, 'custom_mb_regex', ''),
+                'custom_db_regex': getattr(self, 'custom_db_regex', ''),
                 'regex_state': getattr(self, 'regex_state', 'default'),
                 'custom_mb_regex': getattr(self, 'custom_mb_regex', ''),
                 'custom_db_regex': getattr(self, 'custom_db_regex', '')
@@ -2354,7 +2335,6 @@ class MainWindow(QMainWindow):
                 self.settings = new_paths
                 self.include_subfolders = new_include_subfolders
                 QMessageBox.information(self, '成功', '设置已保存')
-                self._refresh_regex_status()
                 self.load_filtered_folders()
                 # 刷新文件树以应用隐藏文件设置
                 if self.current_folder:
@@ -2841,7 +2821,6 @@ class MainWindow(QMainWindow):
         self.scan_thread.scan_completed.connect(self.on_scan_completed)
         self.scan_thread.scan_progress.connect(self.on_scan_progress)
         self.scan_thread.start()
-        self._refresh_regex_status()
 
     def closeEvent(self, event):
         """退出时确保后台线程已结束，避免 QThread 被销毁时仍在运行。
@@ -2986,13 +2965,11 @@ class MainWindow(QMainWindow):
                 self.last_project_path = None
                 return
             name = os.path.basename(target)
-            mb_match = self.folder_regex_mb.match(name)
-            db_match = self.folder_regex_db.match(name)
-            match = mb_match or db_match
+            match = self.folder_regex_mb.match(name) or self.folder_regex_db.match(name)
             if not match:
                 self.last_project_path = None
                 return
-            table = self.motherboard_table if mb_match else self.daughterboard_table
+            table = self.motherboard_table if match.group(1) == 'S' else self.daughterboard_table
             for row in range(table.rowCount()):
                 if table.item(row, 0).data(Qt.UserRole) == target:
                     table.selectRow(row)
@@ -3040,9 +3017,7 @@ class MainWindow(QMainWindow):
         folder_name = os.path.basename(folder_path)
         match = self.folder_regex_mb.match(folder_name) or self.folder_regex_db.match(folder_name)
         if match:
-            # group(2) 是注释部分，自定义正则可能没有这么多组
-            groups = match.groups()
-            return groups[1] if len(groups) > 1 and groups[1] else ''
+            return match.group(2) if match.group(2) else ''
         return ''
 
     def _show_folder_context_menu(self, table, pos):
@@ -4010,9 +3985,6 @@ class MainWindow(QMainWindow):
     def smart_extract(self, archive_path):
         """智能解压：单文件/单文件夹直接解压，多文件则创建同名文件夹"""
         try:
-            # 检查是否尝试解压到正在运行的 exe
-            if self._check_running_exe_blocked(archive_path, '解压'):
-                return
             ext = os.path.splitext(archive_path)[1].lower()
             parent_dir = os.path.dirname(archive_path)
             archive_name = os.path.splitext(os.path.basename(archive_path))[0]
@@ -4088,8 +4060,7 @@ class MainWindow(QMainWindow):
             db_match = self.folder_regex_db.match(folder_name)
             match = mb_match or db_match
             if match:
-                # group(1) 是编号，自定义正则可能没有捕获组
-                number = match.group(1) if match.lastindex else '(?)'
+                number = match.group(1)
                 self.statusBar().showMessage(f"当前文件夹：{number}")
         # 同步刷新文件数/大小统计
         self._refresh_folder_stats()
@@ -5007,18 +4978,6 @@ class MainWindow(QMainWindow):
         finally:
             self.statusBar().clearMessage()
 
-
-    def _refresh_regex_status(self):
-        """状态栏显示当前正则来源，fallback 时红色警告。"""
-        if getattr(self, 'regex_state', 'default') == 'default':
-            self.regex_status_label.setText('正则: 默认')
-            self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
-        elif getattr(self, '_regex_fallback', False):
-            self.regex_status_label.setText('正则: ⚠ 回退')
-            self.regex_status_label.setStyleSheet('color: #c0392b; padding: 0 8px;')
-        else:
-            self.regex_status_label.setText('正则: 自定义')
-            self.regex_status_label.setStyleSheet('color: #27ae60; padding: 0 8px;')
 
     def show_about(self):
         about_text = (
