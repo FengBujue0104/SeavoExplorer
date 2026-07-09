@@ -2266,6 +2266,9 @@ class MainWindow(QMainWindow):
             new_paths, new_include_subfolders, new_sort_by_number, new_show_hidden, new_regex_state, new_custom_mb_regex, new_custom_db_regex = dialog.get_settings()
             self.sort_by_number = new_sort_by_number
             self.show_hidden = new_show_hidden
+            self.regex_state = new_regex_state
+            self.custom_mb_regex = new_custom_mb_regex
+            self.custom_db_regex = new_custom_db_regex
             if self.save_settings_to_file(new_paths, new_include_subfolders):
                 self.settings = new_paths
                 self.include_subfolders = new_include_subfolders
