@@ -38,9 +38,21 @@ from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QPainter, QColor, QPen, Q
 
 _SPLASH_PIXMAP = None
 
-# 项目文件夹命名正则：S/M 前缀 + 3~4 位编号 + 可选 _注释 后缀。
-# 集中定义，扫描器与各定位/状态栏 helper 统一复用，避免命名规则调整时漏改。
-PROJECT_FOLDER_RE = re.compile(r'^([SM])(\d{3,4})(?:_(.*))?$')
+# 项目文件夹默认命名正则：主板 S 前缀 / 子卡 M 前缀 + 3~4 位编号 + 可选 _注释 后缀。
+# 实际使用时请通过 self.folder_regex_mb / self.folder_regex_db 获取。
+DEFAULT_MB_RE_TEXT = r'^S(\d{3,4})(?:_(.*))?$'
+DEFAULT_DB_RE_TEXT = r'^M(\d{3,4})(?:_(.*))?$'
+DEFAULT_MB_RE = re.compile(DEFAULT_MB_RE_TEXT)
+DEFAULT_DB_RE = re.compile(DEFAULT_DB_RE_TEXT)
+
+def _resolve_regex(state, custom_text, default_re):
+    """根据 state 返回 (re.Pattern, is_fallback)。state 为 custom 时尝试编译 custom_text，失败时兜底到默认正则。"""
+    if state == "custom":
+        try:
+            return re.compile(custom_text), False
+        except re.error:
+            return default_re, True
+    return default_re, False
 APP_VERSION = '0.4.2'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
@@ -605,12 +617,15 @@ class FolderScanThread(QThread):
     scan_started = pyqtSignal()
     scan_progress = pyqtSignal(str)  # 发射当前扫描的目录
     
-    def __init__(self, settings, include_subfolders, comments, sort_by_number=False):
+    def __init__(self, settings, include_subfolders, comments, sort_by_number=False, mb_regex=None, db_regex=None):
         super().__init__()
         self.settings = settings
         self.include_subfolders = include_subfolders
         self.comments = comments
         self.sort_by_number = sort_by_number
+        # 线程安全：在创建时快照正则，不在运行中读共享状态
+        self._mb_regex = mb_regex or DEFAULT_MB_RE
+        self._db_regex = db_regex or DEFAULT_DB_RE
 
     def _scan_directory(self, directory, dir_name, motherboard_folders, daughterboard_folders):
         """扫描单个目录，收集匹配的项目文件夹"""
@@ -623,16 +638,19 @@ class FolderScanThread(QThread):
                     return
                 item_path = os.path.join(directory, item)
                 if os.path.isdir(item_path) and not os.path.islink(item_path):
-                    match = PROJECT_FOLDER_RE.match(item)
-                    if match:
-                        prefix = match.group(1)
-                        number = match.group(2)
-                        folder_comment = match.group(3) if match.group(3) else ''
+                    # 先匹配主板，再匹配子卡（双正则独立）
+                    mb_match = self._mb_regex.match(item)
+                    db_match = self._db_regex.match(item)
+                    if mb_match:
+                        number = mb_match.group(1)
+                        folder_comment = mb_match.group(2) if mb_match.group(2) else ''
                         internal_comment = self.comments.get(item_path, folder_comment)
-                        if prefix == 'S':
-                            motherboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
-                        elif prefix == 'M':
-                            daughterboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
+                        motherboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
+                    if db_match:
+                        number = db_match.group(1)
+                        folder_comment = db_match.group(2) if db_match.group(2) else ''
+                        internal_comment = self.comments.get(item_path, folder_comment)
+                        daughterboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
                     if self.include_subfolders:
                         self._scan_directory(item_path, dir_name, motherboard_folders, daughterboard_folders)
         except Exception as e:
@@ -1194,13 +1212,16 @@ class _ReorderableTableDialog(QDialog):
 
 
 class SettingsDialog(_ReorderableTableDialog):
-    def __init__(self, current_paths, include_subfolders=False, sort_by_number=False, parent=None, show_hidden=False):
+    def __init__(self, current_paths, include_subfolders=False, sort_by_number=False, parent=None, show_hidden=False, regex_state='default', custom_mb_regex='', custom_db_regex=''):
         super().__init__(parent)
         self.current_paths = current_paths if current_paths is not None else []
         self.paths = list(self.current_paths)
         self.include_subfolders = include_subfolders
         self.sort_by_number = sort_by_number
         self.show_hidden = show_hidden
+        self.regex_state = regex_state
+        self.custom_mb_regex = custom_mb_regex
+        self.custom_db_regex = custom_db_regex
         self.setWindowTitle('项目文件夹设置')
         self.setGeometry(300, 300, 550, 450)
         
@@ -1245,6 +1266,48 @@ class SettingsDialog(_ReorderableTableDialog):
         self.show_hidden_checkbox.setCheckable(True)
         self.show_hidden_checkbox.setChecked(self.show_hidden)
         
+        # --- 正则设置区域 ---
+        regex_group = QGroupBox('项目文件夹命名规则')
+        regex_layout = QVBoxLayout()
+        
+        self.regex_default_rb = QRadioButton('默认 (主板 S + 编号, 子卡 M + 编号)')
+        self.regex_custom_rb = QRadioButton('自定义正则')
+        regex_layout.addWidget(self.regex_default_rb)
+        regex_layout.addWidget(self.regex_custom_rb)
+        
+        # 主板正则输入
+        mb_row = QHBoxLayout()
+        mb_row.addWidget(QLabel('主板:'))
+        self.regex_mb_edit = QLineEdit()
+        self.regex_mb_edit.setPlaceholderText(r'^S(\d{3,4})(?:_(.*))?$')
+        mb_row.addWidget(self.regex_mb_edit)
+        regex_layout.addLayout(mb_row)
+        
+        # 子卡正则输入
+        db_row = QHBoxLayout()
+        db_row.addWidget(QLabel('子卡:'))
+        self.regex_db_edit = QLineEdit()
+        self.regex_db_edit.setPlaceholderText(r'^M(\d{3,4})(?:_(.*))?$')
+        db_row.addWidget(self.regex_db_edit)
+        regex_layout.addLayout(db_row)
+        
+        # 测试按钮和状态
+        test_row = QHBoxLayout()
+        self.regex_test_btn = QPushButton('测试')
+        self.regex_test_btn.clicked.connect(self._test_regex)
+        self.regex_custom_rb.clicked.connect(lambda: self._on_regex_mode_changed('custom'))
+        self.regex_default_rb.clicked.connect(lambda: self._on_regex_mode_changed('default'))
+        test_row.addWidget(self.regex_test_btn)
+        test_row.addStretch()
+        regex_layout.addLayout(test_row)
+        
+        self.regex_status_label = QLabel()
+        self.regex_status_label.setWordWrap(True)
+        regex_layout.addWidget(self.regex_status_label)
+        
+        regex_group.setLayout(regex_layout)
+        layout.addWidget(regex_group)
+        
         save_btn = QPushButton('保存设置')
         save_btn.clicked.connect(self.save_settings)
         
@@ -1258,6 +1321,57 @@ class SettingsDialog(_ReorderableTableDialog):
         layout.addWidget(save_btn)
         self.setLayout(layout)
         
+        # 初始化 UI 状态
+        self._refresh_regex_ui()
+        
+    def _on_regex_mode_changed(self, state):
+        """Radio button 切换时同步 regex_state 并刷新 UI。
+        
+        state: 'custom' 或 'default'，由调用者直接传入，避免 toggled 双重信号导致状态覆盖。
+        """
+        self.regex_state = state
+        self._refresh_regex_ui()
+
+    def _refresh_regex_ui(self):
+        """根据 self.regex_state 同步 UI 状态和编辑框内容。"""
+        is_custom = self.regex_state == 'custom'
+        self.regex_custom_rb.setChecked(is_custom)
+        self.regex_default_rb.setChecked(not is_custom)
+        self.regex_mb_edit.setText(self.custom_mb_regex if is_custom else DEFAULT_MB_RE_TEXT)
+        self.regex_db_edit.setText(self.custom_db_regex if is_custom else DEFAULT_DB_RE_TEXT)
+        self.regex_mb_edit.setEnabled(is_custom)
+        self.regex_db_edit.setEnabled(is_custom)
+        self.regex_test_btn.setEnabled(is_custom)
+        self._test_regex()
+
+    def _test_regex(self):
+        """实时验证两个自定义正则并更新状态标签。"""
+        if self.regex_state == 'default':
+            self.regex_status_label.setText(f'✅ 使用默认：主板 {DEFAULT_MB_RE_TEXT}，子卡 {DEFAULT_DB_RE_TEXT}')
+            self.regex_status_label.setStyleSheet('color: #27ae60;')
+            return
+        mb_text = self.regex_mb_edit.text().strip()
+        db_text = self.regex_db_edit.text().strip()
+        errors = []
+        if not mb_text:
+            errors.append('主板正则不能为空')
+        try:
+            re.compile(mb_text)
+        except re.error as e:
+            errors.append(f'主板正则无效: {e}')
+        if not db_text:
+            errors.append('子卡正则不能为空')
+        try:
+            re.compile(db_text)
+        except re.error as e:
+            errors.append(f'子卡正则无效: {e}')
+        if errors:
+            self.regex_status_label.setText('❌ ' + '; '.join(errors) + '（保存后将回退到默认）')
+            self.regex_status_label.setStyleSheet('color: #c0392b;')
+        else:
+            self.regex_status_label.setText(f'✅ 主板: {mb_text}  |  子卡: {db_text}')
+            self.regex_status_label.setStyleSheet('color: #27ae60;')
+
     def add_path(self):
         folder_path = QFileDialog.getExistingDirectory(self, '选择项目文件夹')
         if folder_path:
@@ -1285,10 +1399,13 @@ class SettingsDialog(_ReorderableTableDialog):
         self.include_subfolders = self.include_subfolders_checkbox.isChecked()
         self.sort_by_number = self.sort_by_number_checkbox.isChecked()
         self.show_hidden = self.show_hidden_checkbox.isChecked()
+        self.regex_state = 'custom' if self.regex_custom_rb.isChecked() else 'default'
+        self.custom_mb_regex = self.regex_mb_edit.text().strip()
+        self.custom_db_regex = self.regex_db_edit.text().strip()
         self.accept()
         
     def get_settings(self):
-        return self.paths, self.include_subfolders, self.sort_by_number, self.show_hidden
+        return self.paths, self.include_subfolders, self.sort_by_number, self.show_hidden, self.regex_state, self.custom_mb_regex, self.custom_db_regex
 
 
 
@@ -1804,6 +1921,11 @@ class MainWindow(QMainWindow):
         self.folder_stats_label = QLabel('')
         self.folder_stats_label.setStyleSheet('color: #555; padding: 0 8px;')
         self.statusBar().addPermanentWidget(self.folder_stats_label)
+        # 正则状态标签（显示当前匹配规则，fallback 时变红）
+        self.regex_status_label = QLabel('')
+        self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
+        self.statusBar().addPermanentWidget(self.regex_status_label)
+        self._refresh_regex_status()
         # 在状态栏右侧添加回收站按钮
         self.statusBar().addPermanentWidget(self._create_recycle_btn())
 
@@ -1906,6 +2028,9 @@ class MainWindow(QMainWindow):
         self.pinned_folders = []
         self.hidden_folders = []
         self.show_hidden = False
+        self.regex_state = 'default'
+        self.custom_mb_regex = ''
+        self.custom_db_regex = ''
         self.wizard_shown = False
         for key, _name in PREVIEW_CATEGORIES:
             # 视频预览默认关闭(需手动开启),避免无 OpenCV 时卡顿
@@ -1995,6 +2120,9 @@ class MainWindow(QMainWindow):
                 self.wizard_shown = config_data['wizard_shown']
             if 'show_hidden' in config_data:
                 self.show_hidden = config_data['show_hidden']
+            self.regex_state = config_data.get('regex_state', 'default')
+            self.custom_mb_regex = config_data.get('custom_mb_regex', '')
+            self.custom_db_regex = config_data.get('custom_db_regex', '')
             for key, _name in PREVIEW_CATEGORIES:
                 cfg_key = f'preview_{key}_enabled'
                 if cfg_key in config_data:
@@ -2061,7 +2189,10 @@ class MainWindow(QMainWindow):
                 'pinned_folders': getattr(self, 'pinned_folders', []),
                 'hidden_folders': getattr(self, 'hidden_folders', []),
                 'wizard_shown': getattr(self, 'wizard_shown', False),
-                'show_hidden': getattr(self, 'show_hidden', False)
+                'show_hidden': getattr(self, 'show_hidden', False),
+                'regex_state': getattr(self, 'regex_state', 'default'),
+                'custom_mb_regex': getattr(self, 'custom_mb_regex', ''),
+                'custom_db_regex': getattr(self, 'custom_db_regex', '')
             }
             for key, _name in PREVIEW_CATEGORIES:
                 cfg_key = f'preview_{key}_enabled'
@@ -2130,15 +2261,16 @@ class MainWindow(QMainWindow):
             return False
     
     def show_settings_dialog(self):
-        dialog = SettingsDialog(self.settings, self.include_subfolders, self.sort_by_number, self, getattr(self, 'show_hidden', False))
+        dialog = SettingsDialog(self.settings, self.include_subfolders, self.sort_by_number, self, getattr(self, 'show_hidden', False), getattr(self, 'regex_state', 'default'), getattr(self, 'custom_mb_regex', ''), getattr(self, 'custom_db_regex', ''))
         if dialog.exec_():
-            new_paths, new_include_subfolders, new_sort_by_number, new_show_hidden = dialog.get_settings()
+            new_paths, new_include_subfolders, new_sort_by_number, new_show_hidden, new_regex_state, new_custom_mb_regex, new_custom_db_regex = dialog.get_settings()
             self.sort_by_number = new_sort_by_number
             self.show_hidden = new_show_hidden
             if self.save_settings_to_file(new_paths, new_include_subfolders):
                 self.settings = new_paths
                 self.include_subfolders = new_include_subfolders
                 QMessageBox.information(self, '成功', '设置已保存')
+                self._refresh_regex_status()
                 self.load_filtered_folders()
                 # 刷新文件树以应用隐藏文件设置
                 if self.current_folder:
@@ -2613,11 +2745,19 @@ class MainWindow(QMainWindow):
         # 在状态栏显示加载信息
         self.statusBar().showMessage("正在扫描文件夹...")
 
+        # 解析正则（自定义正则无效时自动回退到默认）
+        self._regex_fallback = False
+        mb_regex, mb_fallback = _resolve_regex(self.regex_state, self.custom_mb_regex, DEFAULT_MB_RE)
+        db_regex, db_fallback = _resolve_regex(self.regex_state, self.custom_db_regex, DEFAULT_DB_RE)
+        self._regex_fallback = mb_fallback or db_fallback
+        self.folder_regex_mb = mb_regex
+        self.folder_regex_db = db_regex
         # 创建并启动扫描线程
-        self.scan_thread = FolderScanThread(self.settings, self.include_subfolders, self.comments, self.sort_by_number)
+        self.scan_thread = FolderScanThread(self.settings, self.include_subfolders, self.comments, self.sort_by_number, mb_regex=self.folder_regex_mb, db_regex=self.folder_regex_db)
         self.scan_thread.scan_completed.connect(self.on_scan_completed)
         self.scan_thread.scan_progress.connect(self.on_scan_progress)
         self.scan_thread.start()
+        self._refresh_regex_status()
 
     def closeEvent(self, event):
         """退出时确保后台线程已结束，避免 QThread 被销毁时仍在运行。
@@ -2762,7 +2902,7 @@ class MainWindow(QMainWindow):
                 self.last_project_path = None
                 return
             name = os.path.basename(target)
-            match = PROJECT_FOLDER_RE.match(name)
+            match = self.folder_regex_mb.match(name) or self.folder_regex_db.match(name)
             if not match:
                 self.last_project_path = None
                 return
@@ -2812,9 +2952,9 @@ class MainWindow(QMainWindow):
         if folder_path in self.comments:
             return self.comments[folder_path]
         folder_name = os.path.basename(folder_path)
-        match = PROJECT_FOLDER_RE.match(folder_name)
+        match = self.folder_regex_mb.match(folder_name) or self.folder_regex_db.match(folder_name)
         if match:
-            return match.group(3) if match.group(3) else ''
+            return match.group(2) if match.group(2) else ''
         return ''
 
     def _show_folder_context_menu(self, table, pos):
@@ -3853,14 +3993,12 @@ class MainWindow(QMainWindow):
         """更新状态栏显示当前项目文件夹信息"""
         if self.current_folder:
             folder_name = os.path.basename(self.current_folder)
-            match = PROJECT_FOLDER_RE.match(folder_name)
+            mb_match = self.folder_regex_mb.match(folder_name)
+            db_match = self.folder_regex_db.match(folder_name)
+            match = mb_match or db_match
             if match:
-                prefix = match.group(1)
-                number = match.group(2)
-                if prefix == 'S':
-                    self.statusBar().showMessage(f"当前文件夹：S{number}")
-                else:
-                    self.statusBar().showMessage(f"当前文件夹：M{number}")
+                number = match.group(1)
+                self.statusBar().showMessage(f"当前文件夹：{number}")
         # 同步刷新文件数/大小统计
         self._refresh_folder_stats()
 
@@ -4034,13 +4172,14 @@ class MainWindow(QMainWindow):
     
     def locate_new_folder(self, folder_path):
         folder_name = os.path.basename(folder_path)
-        match = PROJECT_FOLDER_RE.match(folder_name)
-        if match:
-            prefix = match.group(1)
-            if prefix == 'S':
-                table = self.motherboard_table
-            else:
-                table = self.daughterboard_table
+        mb_match = self.folder_regex_mb.match(folder_name)
+        db_match = self.folder_regex_db.match(folder_name)
+        if mb_match:
+            table = self.motherboard_table
+        elif db_match:
+            table = self.daughterboard_table
+        else:
+            return
             for row in range(table.rowCount()):
                 row_path = table.item(row, 0).data(Qt.UserRole)
                 if row_path == folder_path:
@@ -4056,8 +4195,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '警告', '请先选择一个项目文件夹')
             return
         folder_name = os.path.basename(self.current_folder)
-        match = PROJECT_FOLDER_RE.match(folder_name)
-        if not match:
+        if not (self.folder_regex_mb.match(folder_name) or self.folder_regex_db.match(folder_name)):
             QMessageBox.warning(self, '警告', '当前选择的不是有效的项目文件夹')
             return
         try:
@@ -4777,6 +4915,18 @@ class MainWindow(QMainWindow):
         finally:
             self.statusBar().clearMessage()
 
+
+    def _refresh_regex_status(self):
+        """状态栏显示当前正则来源，fallback 时红色警告。"""
+        if getattr(self, 'regex_state', 'default') == 'default':
+            self.regex_status_label.setText('正则: 默认')
+            self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
+        elif getattr(self, '_regex_fallback', False):
+            self.regex_status_label.setText('正则: ⚠ 回退')
+            self.regex_status_label.setStyleSheet('color: #c0392b; padding: 0 8px;')
+        else:
+            self.regex_status_label.setText('正则: 自定义')
+            self.regex_status_label.setStyleSheet('color: #27ae60; padding: 0 8px;')
 
     def show_about(self):
         about_text = (
