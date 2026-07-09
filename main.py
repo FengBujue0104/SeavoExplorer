@@ -1333,12 +1333,19 @@ class SettingsDialog(_ReorderableTableDialog):
         self._refresh_regex_ui()
 
     def _refresh_regex_ui(self):
-        """根据 self.regex_state 同步 UI 状态和编辑框内容。"""
+        """根据 self.regex_state 同步 UI 状态和编辑框内容。
+
+        自定义模式下如果用户从未配置过（字段为空），预填默认正则作为编辑起点，
+        避免编辑框完全空白导致用户无从下手。
+        """
         is_custom = self.regex_state == 'custom'
         self.regex_custom_rb.setChecked(is_custom)
         self.regex_default_rb.setChecked(not is_custom)
-        self.regex_mb_edit.setText(self.custom_mb_regex if is_custom else DEFAULT_MB_RE_TEXT)
-        self.regex_db_edit.setText(self.custom_db_regex if is_custom else DEFAULT_DB_RE_TEXT)
+        # 主板正则：自定义模式下若用户未填过，预填默认值作为起点
+        mb_text = self.custom_mb_regex if is_custom and self.custom_mb_regex else DEFAULT_MB_RE_TEXT
+        db_text = self.custom_db_regex if is_custom and self.custom_db_regex else DEFAULT_DB_RE_TEXT
+        self.regex_mb_edit.setText(mb_text)
+        self.regex_db_edit.setText(db_text)
         self.regex_mb_edit.setEnabled(is_custom)
         self.regex_db_edit.setEnabled(is_custom)
         self.regex_test_btn.setEnabled(is_custom)
