@@ -672,12 +672,14 @@ class FolderScanThread(QThread):
                     db_match = self._db_regex.match(item)
                     if mb_match:
                         number = mb_match.group(1)
-                        folder_comment = mb_match.group(2) if mb_match.group(2) else ''
+                        groups = mb_match.groups()
+                        folder_comment = groups[1] if len(groups) > 1 and groups[1] else ''
                         internal_comment = self.comments.get(item_path, folder_comment)
                         motherboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
                     if db_match:
                         number = db_match.group(1)
-                        folder_comment = db_match.group(2) if db_match.group(2) else ''
+                        groups = db_match.groups()
+                        folder_comment = groups[1] if len(groups) > 1 and groups[1] else ''
                         internal_comment = self.comments.get(item_path, folder_comment)
                         daughterboard_folders.append((int(number), item_path, number, internal_comment, dir_name))
                     if self.include_subfolders:
@@ -2081,6 +2083,8 @@ class MainWindow(QMainWindow):
         self.regex_state = 'default'
         self.custom_mb_regex = ''
         self.custom_db_regex = ''
+        self.folder_regex_mb = DEFAULT_MB_RE
+        self.folder_regex_db = DEFAULT_DB_RE
         self.wizard_shown = False
         for key, _name in PREVIEW_CATEGORIES:
             # 视频预览默认关闭(需手动开启),避免无 OpenCV 时卡顿
@@ -3009,7 +3013,9 @@ class MainWindow(QMainWindow):
         folder_name = os.path.basename(folder_path)
         match = self.folder_regex_mb.match(folder_name) or self.folder_regex_db.match(folder_name)
         if match:
-            return match.group(2) if match.group(2) else ''
+            # group(2) 是注释部分，自定义正则可能没有这么多组
+            groups = match.groups()
+            return groups[1] if len(groups) > 1 and groups[1] else ''
         return ''
 
     def _show_folder_context_menu(self, table, pos):
@@ -4052,7 +4058,8 @@ class MainWindow(QMainWindow):
             db_match = self.folder_regex_db.match(folder_name)
             match = mb_match or db_match
             if match:
-                number = match.group(1)
+                # group(1) 是编号，自定义正则可能没有捕获组
+                number = match.group(1) if match.lastindex else '(?)'
                 self.statusBar().showMessage(f"当前文件夹：{number}")
         # 同步刷新文件数/大小统计
         self._refresh_folder_stats()
