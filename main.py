@@ -705,6 +705,9 @@ class FolderScanThread(QThread):
             motherboard_folders.sort(key=lambda x: (dir_order.get(x[4], 999), x[0]))
             daughterboard_folders.sort(key=lambda x: (dir_order.get(x[4], 999), x[0]))
         if not self.isInterruptionRequested():
+            total_matches = len(motherboard_folders) + len(daughterboard_folders)
+            if total_matches > self.MAX_MATCHES_WARNING:
+                self.scan_progress.emit(f'⚠ 匹配到 {total_matches} 个项目，正则可能过于宽松')
             self.scan_completed.emit(motherboard_folders, daughterboard_folders)
 
 
@@ -713,6 +716,7 @@ class FolderStatsThread(QThread):
     stats_ready = pyqtSignal(int, int, int, bool)  # (token, file_count, total_size, truncated)
 
     MAX_FILES = 50000  # 软上限：超过即停，UI 显示 50000+
+    MAX_MATCHES_WARNING = 500  # 单次扫描匹配超过此数量时警告（可能正则过于宽松）
 
     def __init__(self, root, token):
         super().__init__()
