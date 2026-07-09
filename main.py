@@ -1295,8 +1295,8 @@ class SettingsDialog(_ReorderableTableDialog):
         test_row = QHBoxLayout()
         self.regex_test_btn = QPushButton('测试')
         self.regex_test_btn.clicked.connect(self._test_regex)
-        self.regex_default_rb.toggled.connect(self._on_regex_mode_changed)
-        self.regex_custom_rb.toggled.connect(self._on_regex_mode_changed)
+        self.regex_custom_rb.clicked.connect(lambda: self._on_regex_mode_changed('custom'))
+        self.regex_default_rb.clicked.connect(lambda: self._on_regex_mode_changed('default'))
         test_row.addWidget(self.regex_test_btn)
         test_row.addStretch()
         regex_layout.addLayout(test_row)
@@ -1324,9 +1324,12 @@ class SettingsDialog(_ReorderableTableDialog):
         # 初始化 UI 状态
         self._refresh_regex_ui()
         
-    def _on_regex_mode_changed(self):
-        """Radio button 切换时同步 regex_state 并刷新 UI。"""
-        self.regex_state = 'custom' if self.regex_custom_rb.isChecked() else 'default'
+    def _on_regex_mode_changed(self, state):
+        """Radio button 切换时同步 regex_state 并刷新 UI。
+        
+        state: 'custom' 或 'default'，由调用者直接传入，避免 toggled 双重信号导致状态覆盖。
+        """
+        self.regex_state = state
         self._refresh_regex_ui()
 
     def _refresh_regex_ui(self):
