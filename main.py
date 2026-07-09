@@ -1212,13 +1212,16 @@ class _ReorderableTableDialog(QDialog):
 
 
 class SettingsDialog(_ReorderableTableDialog):
-    def __init__(self, current_paths, include_subfolders=False, sort_by_number=False, parent=None, show_hidden=False):
+    def __init__(self, current_paths, include_subfolders=False, sort_by_number=False, parent=None, show_hidden=False, regex_state='default', custom_mb_regex='', custom_db_regex=''):
         super().__init__(parent)
         self.current_paths = current_paths if current_paths is not None else []
         self.paths = list(self.current_paths)
         self.include_subfolders = include_subfolders
         self.sort_by_number = sort_by_number
         self.show_hidden = show_hidden
+        self.regex_state = regex_state
+        self.custom_mb_regex = custom_mb_regex
+        self.custom_db_regex = custom_db_regex
         self.setWindowTitle('项目文件夹设置')
         self.setGeometry(300, 300, 550, 450)
         
@@ -1386,10 +1389,13 @@ class SettingsDialog(_ReorderableTableDialog):
         self.include_subfolders = self.include_subfolders_checkbox.isChecked()
         self.sort_by_number = self.sort_by_number_checkbox.isChecked()
         self.show_hidden = self.show_hidden_checkbox.isChecked()
+        self.regex_state = 'custom' if self.regex_custom_rb.isChecked() else 'default'
+        self.custom_mb_regex = self.regex_mb_edit.text().strip()
+        self.custom_db_regex = self.regex_db_edit.text().strip()
         self.accept()
         
     def get_settings(self):
-        return self.paths, self.include_subfolders, self.sort_by_number, self.show_hidden
+        return self.paths, self.include_subfolders, self.sort_by_number, self.show_hidden, self.regex_state, self.custom_mb_regex, self.custom_db_regex
 
 
 
@@ -1905,6 +1911,11 @@ class MainWindow(QMainWindow):
         self.folder_stats_label = QLabel('')
         self.folder_stats_label.setStyleSheet('color: #555; padding: 0 8px;')
         self.statusBar().addPermanentWidget(self.folder_stats_label)
+        # 正则状态标签（显示当前匹配规则，fallback 时变红）
+        self.regex_status_label = QLabel('')
+        self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
+        self.statusBar().addPermanentWidget(self.regex_status_label)
+        self._refresh_regex_status()
         # 在状态栏右侧添加回收站按钮
         self.statusBar().addPermanentWidget(self._create_recycle_btn())
 
@@ -2249,6 +2260,7 @@ class MainWindow(QMainWindow):
                 self.settings = new_paths
                 self.include_subfolders = new_include_subfolders
                 QMessageBox.information(self, '成功', '设置已保存')
+                self._refresh_regex_status()
                 self.load_filtered_folders()
                 # 刷新文件树以应用隐藏文件设置
                 if self.current_folder:
@@ -2735,6 +2747,7 @@ class MainWindow(QMainWindow):
         self.scan_thread.scan_completed.connect(self.on_scan_completed)
         self.scan_thread.scan_progress.connect(self.on_scan_progress)
         self.scan_thread.start()
+        self._refresh_regex_status()
 
     def closeEvent(self, event):
         """退出时确保后台线程已结束，避免 QThread 被销毁时仍在运行。
@@ -4892,6 +4905,18 @@ class MainWindow(QMainWindow):
         finally:
             self.statusBar().clearMessage()
 
+
+    def _refresh_regex_status(self):
+        """状态栏显示当前正则来源，fallback 时红色警告。"""
+        if getattr(self, 'regex_state', 'default') == 'default':
+            self.regex_status_label.setText('正则: 默认')
+            self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
+        elif getattr(self, '_regex_fallback', False):
+            self.regex_status_label.setText('正则: ⚠ 回退')
+            self.regex_status_label.setStyleSheet('color: #c0392b; padding: 0 8px;')
+        else:
+            self.regex_status_label.setText('正则: 自定义')
+            self.regex_status_label.setStyleSheet('color: #27ae60; padding: 0 8px;')
 
     def show_about(self):
         about_text = (
