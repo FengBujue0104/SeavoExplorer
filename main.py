@@ -53,6 +53,24 @@ def _resolve_regex(state, custom_text, default_re):
         except re.error:
             return default_re, True
     return default_re, False
+
+def _is_regex_safe(pattern):
+    """检测正则是否有 ReDoS（灾难性回溯）风险。"""
+    import time
+    try:
+        compiled = re.compile(pattern)
+    except re.error as e:
+        return False, str(e)
+    for test_str in ['A' * 50, 'a' * 50, '1' * 50, '_' * 50]:
+        start = time.monotonic()
+        try:
+            compiled.search(test_str)
+            if time.monotonic() - start > 0.5:
+                return False, 'match too slow'
+        except RuntimeError:
+            return False, 'recursion limit'
+    return True, ''
+
 APP_VERSION = '0.4.2'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
@@ -1277,6 +1295,8 @@ class SettingsDialog(_ReorderableTableDialog):
         self.regex_custom_rb = QRadioButton('自定义正则')
         regex_layout.addWidget(self.regex_default_rb)
         regex_layout.addWidget(self.regex_custom_rb)
+        self.regex_custom_rb.clicked.connect(lambda checked: self._on_regex_mode_changed('custom'))
+        self.regex_default_rb.clicked.connect(lambda checked: self._on_regex_mode_changed('default'))
         
         # 主板正则输入
         mb_row = QHBoxLayout()
@@ -1338,8 +1358,11 @@ class SettingsDialog(_ReorderableTableDialog):
         self._test_regex()
 
     def _on_regex_mode_changed(self, state):
+        print(f'DEBUG: _on_regex_mode_changed called with state={state}')
         self.regex_state = state
         self._refresh_regex_ui()
+        print(f'DEBUG: regex_state={self.regex_state}, mb_edit enabled={self.regex_mb_edit.isEnabled()}')
+
 
     def _test_regex(self):
         """实时验证两个自定义正则并更新状态标签。"""
