@@ -48,7 +48,7 @@ DEFAULT_DB_RE = re.compile(DEFAULT_DB_RE_TEXT)
 def _is_regex_safe(pattern):
     """检查正则是否存在 ReDoS（灾难性回溯）风险。
 
-    简单启发式：编译后测试一个中等长度字符串，如果匹配时间过长或抛出 RuntimeError，
+    简单启发式：编译后测试多种字符的最坏情况字符串，如果匹配时间过长或抛出 RuntimeError，
     视为不安全。返回 (is_safe, error_message)。
     """
     import time
@@ -56,17 +56,18 @@ def _is_regex_safe(pattern):
         compiled = re.compile(pattern)
     except re.error as e:
         return False, str(e)
-    # 测试用例：50 个字符的字符串，模拟最坏情况
-    test_str = 'A' * 50
-    start = time.monotonic()
-    try:
-        compiled.search(test_str)
-        elapsed = time.monotonic() - start
-        if elapsed > 0.5:  # 超过 500ms 视为有风险
-            return False, f'正则匹配耗时过长 ({elapsed:.2f}s)，可能存在回溯风险'
-        return True, ''
-    except RuntimeError:
-        return False, '正则匹配触发递归限制'
+    # 测试用例：多种字符组合的最坏情况字符串
+    test_cases = ['A' * 50, 'a' * 50, '1' * 50, '_' * 50, 'S' * 50, 'M' * 50, '0' * 50]
+    for test_str in test_cases:
+        start = time.monotonic()
+        try:
+            compiled.search(test_str)
+            elapsed = time.monotonic() - start
+            if elapsed > 0.5:  # 超过 500ms 视为有风险
+                return False, f'正则匹配耗时过长 ({elapsed:.2f}s)，可能存在回溯风险'
+        except RuntimeError:
+            return False, '正则匹配触发递归限制'
+    return True, ''
 
 def _resolve_regex(state, custom_text, default_re):
     """根据 state 返回 (re.Pattern, is_fallback)。state 为 custom 时尝试编译 custom_text，失败时兜底到默认正则。"""
@@ -2954,11 +2955,13 @@ class MainWindow(QMainWindow):
                 self.last_project_path = None
                 return
             name = os.path.basename(target)
-            match = self.folder_regex_mb.match(name) or self.folder_regex_db.match(name)
+            mb_match = self.folder_regex_mb.match(name)
+            db_match = self.folder_regex_db.match(name)
+            match = mb_match or db_match
             if not match:
                 self.last_project_path = None
                 return
-            table = self.motherboard_table if match.group(1) == 'S' else self.daughterboard_table
+            table = self.motherboard_table if mb_match else self.daughterboard_table
             for row in range(table.rowCount()):
                 if table.item(row, 0).data(Qt.UserRole) == target:
                     table.selectRow(row)
