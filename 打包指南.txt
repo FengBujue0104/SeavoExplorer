@@ -1,145 +1,204 @@
-# SeavoExplorer 打包指南
+# SeavoExplorer Windows 构建与发布指南
 
-本文说明如何将主板项目文件浏览器打包为 Windows 可执行程序。
+本文以本机已经跑通的构建与 v0.5.0 发布事实为基础，并记录仓库当前固化的后续流程。`main.spec` 是 onefile/onedir 的唯一 PyInstaller 配置来源；新的 draft/恢复发布自动化已通过无网络测试，但要到下一版本实发后才能称为 GitHub 端到端验证。
 
-## 系统要求
+## 1. 已验证基线
 
-- Windows 10/11
-- Python 3.8 或更高版本
-- 建议至少 2GB 可用内存
-- 推荐使用普通用户终端打包；PyInstaller 不建议在管理员终端中运行
+2026-07-10 的 v0.5.0 构建环境：
 
-## 安装依赖
+| 组件 | 已验证版本 |
+| --- | --- |
+| Windows | Windows 10/11 x64 |
+| Python | 3.13.2 x64 |
+| PyInstaller | 6.12.0 |
+| PyQt5 | 5.15.11 |
+| Send2Trash | 2.1.0 |
+| pywin32 | 312 |
 
-在项目目录下执行：
+全部直接和关键传递依赖见 `requirements-build.txt`。源码仍保持 Python 3.8 grammar 兼容，但官方 EXE 发布应使用上表环境；偏离基线时包装器会停止，只有本地试验可显式加 `--allow-unverified-env`。
 
-```bash
-py -m pip install -r requirements.txt
+本机已确认可用的解释器是：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe" --version
 ```
 
-主要依赖：
+文档其余位置用 `python` 表示当前已经选中的正确解释器。本机 `py` launcher 不可用，不要把它写进自动流程。
 
-- PyQt5：GUI 框架
-- PyPDF2：PDF 预览
-- openpyxl / xlrd：Excel 预览
-- python-docx / olefile：Word 预览
-- Pillow：图片处理和图标生成
-- opencv-python / numpy：视频缩略图生成
-- Send2Trash / pywin32：Windows 10/11 强制回收站接口，失败时不降级为永久删除
-- PyInstaller：打包工具
+## 2. 首次准备构建环境
 
-说明：程序对 `.rar` / `.7z` 的预览和解压依赖外部 `7z.exe`，不是通过 `rarfile` 或 `py7zr` 打包进程序。请安装 7-Zip，或将 `7z.exe` 放在 exe 同目录，也可在程序内通过“设置 → 7-Zip路径设置”指定路径。
+在仓库根目录创建专用虚拟环境。正式构建要求 `sys.prefix != sys.base_prefix`、未启用 `system-site-packages`，并且已安装发行包集合只能等于锁文件加 venv 自带的 pip/wheel：
 
-## 推荐方式：使用打包脚本
-
-### 单文件 exe
-
-```bash
-py build_onefile.py
+```powershell
+python -m venv .venv-build
+.\.venv-build\Scripts\python.exe -m pip install -r requirements-build.txt
 ```
+
+`--install-deps` 仅允许在虚拟环境内使用：
+
+```powershell
+.\.venv-build\Scripts\python.exe build_onefile.py --install-deps
+```
+
+默认构建完全不联网、不运行 pip，也不自动覆盖图标。
+
+构建必需且应纳入 Git 的资源：
+
+- `favicon_src.png`：至少 256x256 的正方形源图；当前为 256x256。
+- `favicon.ico`：16/32/48/64/128/256 六尺寸 ICO。
+
+需要更换图标时才手工执行 `python make_ico.py`；如确实需要本地备份可加 `--backup`。正常构建只校验现有资源。
+
+## 3. 正式 onefile 构建
+
+在仓库根目录执行：
+
+```powershell
+.\.venv-build\Scripts\python.exe build_onefile.py
+```
+
+包装器按顺序完成：
+
+1. 核对隔离 venv、Python、架构、`requirements-build.txt` 精确版本，并拒绝除 venv 自带 pip/wheel 外的任何锁外发行包。
+2. 核对 `main.py`、`pyproject.toml`、README 版本一致，以及两份图标完整。
+3. 检查所有顶层 Python 文件的 Python 3.8 grammar。
+4. 在清除 `PYTHONPATH`、`PYTHONHOME` 和外部 Qt 路径的环境中运行 `py_compile`、setuptools `pyproject.toml` 校验，再运行 `git diff --check`。
+5. 在同一净化环境中运行 `python -m unittest -q test_safety.py test_tooling.py`（当前共 57 项）。
+6. 以净化后的 PATH 调用 `python -m PyInstaller --noconfirm --clean main.spec`。
+7. 审计 `Analysis-00.toc`：二进制来源只允许仓库、当前 Python 和 Windows 系统目录，避免 MiKTeX 等全局 PATH 中的 DLL 混入。
+8. 把 EXE 复制到临时目录，以净化 PATH 和 Qt offscreen 模式做 6 秒隔离启动冒烟；不会读取真实 sidecar 配置，也不会借用宿主机的外部 Qt 插件或 DLL 路径。
+9. 生成 SHA-256 和绑定 commit/dirty/严格环境/完整输入哈希/检查结果的 build manifest；诊断模式产物不能用于 Release。
 
 输出：
 
 ```text
 dist/SeavoExplorer.exe
+dist/SeavoExplorer.exe.sha256
+dist/SeavoExplorer.build.json
 ```
 
-这是发布给用户下载时最常用的格式。
+底层已实际跑通的 PyInstaller 命令是：
 
-### 单目录版本
-
-```bash
-py build_onedir.py
+```powershell
+python -m PyInstaller --noconfirm --clean main.spec
 ```
 
-输出：
+直接运行底层命令默认生成 onefile，并且 spec 自身仍会净化 PATH、审计二进制来源和写入 PE 版本资源；但它不会生成 manifest、运行测试或做隔离启动，正式产物应使用包装器。
+
+可再次人工核对哈希：
+
+```powershell
+Get-FileHash .\dist\SeavoExplorer.exe -Algorithm SHA256
+```
+
+## 4. onedir 构建
+
+```powershell
+.\.venv-build\Scripts\python.exe build_onedir.py
+```
+
+它与 onefile 共用 `main.spec` 和全部检查，只通过严格的 `SEAVO_BUILD_MODE=onedir` 内部环境变量选择 PyInstaller 6.12 官方 onedir 结构。输出位于：
 
 ```text
 dist/SeavoExplorer/
 ```
 
-分发时需要将整个 `dist/SeavoExplorer/` 目录打包为 zip；不要只复制其中的 exe。
+分发时必须压缩整个目录，不能只复制其中的 EXE。`SeavoExplorer.directory.sha256` 列出全部 payload 文件；manifest 记录文件数、总大小和排序后清单的树 SHA-256，校验范围包含 `_internal`。
 
-## 使用 PyInstaller spec
+## 5. 构建产物说明
 
-也可以使用仓库中的 `main.spec`：
+- EXE 的 `FileVersion`、`ProductVersion`、`ProductName` 等 PE 信息由 spec 从 `main.py` 的 `APP_VERSION` 动态生成，不维护第二份 version resource。
+- `main.spec` 固定 `upx=False`，避免未来 PATH 中偶然出现 UPX 后改变产物和杀软表现。
+- `.rar` / `.7z` 依赖用户安装并授权的外部可信 `7z.exe`，不会打入 EXE；ZIP 使用 Python 标准库。
+- 当前没有 Authenticode 代码签名证书，EXE 未签名，Windows SmartScreen 可能提示。版本资源和 SHA-256 不能替代代码签名。
 
-```bash
-pyinstaller main.spec
+## 6. 发布前准备
+
+发布新版本前同步修改并提交：
+
+- `main.py` 的 `APP_VERSION`。
+- `pyproject.toml` 的 `[project].version`。
+- README 顶部版本及实际功能说明。
+
+`test_safety.py`、`test_tooling.py` 和构建前检会拒绝版本及辅助流程漂移。
+
+然后确认当前分支、工作区和远端：
+
+```powershell
+git branch --show-current
+git status --short
+git push origin main
+git fetch origin refs/heads/main:refs/remotes/origin/main --tags
+git rev-list --left-right --count origin/main...HEAD
 ```
 
-`main.spec` 当前输出名称为：
+要求：当前是 `main`、工作区完全干净、最后一条输出为 `0  0`，且 `origin` 指向 `FengBujue0104/SeavoExplorer`。
 
-```text
-SeavoExplorer.exe
+## 7. 创建 GitHub Release
+
+需要 GitHub CLI 2.94.0 或更高版本，并先执行 `gh auth login`。发布脚本必须用上述严格构建 venv 的 Python 运行。
+
+当前 `v0.5.0` 已经发布，禁止再次运行同版本示例。新版本使用真实的下一版本号：
+
+```powershell
+.\.venv-build\Scripts\python.exe release.py vX.Y.Z
 ```
 
-辅助脚本 `build_onefile.py` / `build_onedir.py` 输出名称也为 `SeavoExplorer`，三者已统一。
+发布脚本会：
 
-## 打包内容说明
+1. 检查 `gh` 已登录、版本等于 `APP_VERSION`、clean main 与 `origin/main` 完全一致。
+2. 默认重新运行正式 onefile 构建，并再次验证 HEAD/远端/工作区没有变化。
+3. 只接受 commit、版本、dirty=false、严格依赖、全部检查、输入哈希、EXE 大小和 SHA-256 全部匹配的 manifest。
+4. 冻结三份本地资产快照，再要求输入完整版本号确认，防止等待期间被其他构建替换。
+5. 创建带 commit 和 EXE SHA-256 的 annotated tag 并推送。
+6. 先创建 GitHub draft，只允许 EXE、`.sha256`、`.build.json` 三个资产，并逐个核对固定大小和 GitHub SHA-256 digest。
+7. 再次核对 clean main、origin、annotated tag object、draft/body/资产白名单后才发布为 Latest。
 
-打包脚本会：
+未提供说明文件时使用 GitHub 自动生成 notes，并在开头加入 commit、大小、SHA-256 和未签名提示。需要自定义内容时：
 
-1. 安装/确认必要依赖。
-2. 运行 `make_ico.py` 生成多尺寸 `favicon.ico`。
-3. 调用 PyInstaller 打包 `main.py`。
-4. 将 `favicon.ico` 和 `favicon_src.png` 一并加入程序资源，保证窗口、任务栏和关于页图标可用。
-5. 排除未使用的大型模块，例如 Qt WebEngine、Qt Multimedia、matplotlib、scipy、jupyter 等，以减小体积。
-
-## 配置文件位置
-
-程序运行时会在程序所在目录旁保存配置文件：
-
-- `seavoexplorer.json`：项目路径、排序选项、快捷访问、7-Zip 路径、置顶/隐藏项目等设置。
-- `seavo_comments.json`：项目注释。
-
-开发环境中，这些文件保存在源码目录；打包后，这些文件保存在 exe 所在目录。Windows 下程序会尽量将配置文件设为隐藏。
-
-## 发布脚本
-
-如需创建 GitHub Release，可使用：
-
-```bash
-py release.py v0.5.0
-py release.py --build v0.5.0
+```powershell
+.\.venv-build\Scripts\python.exe release.py vX.Y.Z --notes-file "$env:TEMP\SeavoExplorer-notes.md"
 ```
 
-`--build` 会先运行 `build_onefile.py`，然后发布 `dist/SeavoExplorer.exe`。
+说明文件应放在仓库外（或事先提交），否则“包括未跟踪文件在内的 clean 工作区”前检会拒绝发布。已有 draft 的 `--resume` 不允许重新指定 notes。
 
-发布脚本依赖：
+## 8. 发布失败后的恢复
 
-- GitHub CLI：`gh`
-- 已登录 GitHub：`gh auth login`
-- 当前仓库 remote 指向发布目标
+脚本不会自动删除 tag、draft、Release 或远端资产，也不会使用 `--clobber`。如果上一次已经完成构建，但在 tag/draft/上传阶段中断，先确认：
 
-## 常见问题
+- 本地与远端 tag（若存在）都指向当前 HEAD。
+- `dist/SeavoExplorer.build.json` 的 commit、版本、dirty=false 和 EXE 哈希仍匹配。
+- 同版本尚未正式发布；只能存在 draft。
 
-### 1. 打包失败：PermissionError / WinError 5，无法覆盖 dist/SeavoExplorer.exe
+然后执行：
 
-通常是旧版 exe 正在运行，或被资源管理器、杀毒软件暂时占用。请关闭正在运行的 `SeavoExplorer.exe`，等待几秒后重新打包。
-
-### 2. 打包后 .rar / .7z 无法预览或解压
-
-确认 7-Zip 可用。程序查找顺序为：
-
-1. 程序设置中手动指定的路径
-2. exe 或脚本所在目录下的 `7z.exe`
-3. `C:\Program Files\7-Zip\7z.exe`
-4. `C:\Program Files (x86)\7-Zip\7z.exe`
-
-### 3. 打包后图标不清晰或关于页无图标
-
-确认 `favicon_src.png` 和 `favicon.ico` 存在，然后重新运行：
-
-```bash
-py make_ico.py
-py build_onefile.py
+```powershell
+.\.venv-build\Scripts\python.exe release.py vX.Y.Z --resume
 ```
 
-### 4. 启动后没有项目
+`--resume` 不重新构建，只复用严格校验通过的产物并补齐缺失资产。若发现 tag commit、tag 注释哈希或远端资产冲突，脚本会停止；不要删除旧资产强行覆盖，应查明状态后使用新的版本号。
 
-首次启动需要在“设置 → 项目文件夹设置”中添加项目根目录。程序不会硬编码扫描某个固定路径。
+发布后核对：
 
-### 5. 需要调试启动错误
+```powershell
+git ls-remote origin refs/heads/main refs/tags/vX.Y.Z 'refs/tags/vX.Y.Z^{}'
+gh release view vX.Y.Z -R FengBujue0104/SeavoExplorer --json url,isDraft,tagName,targetCommitish,assets
+```
 
-GUI 打包默认隐藏控制台。如果需要查看启动异常，可临时去掉 `--windowed`，或在 spec 中设置 `console=True` 后重新打包。
+## 9. 常见故障
+
+### 无法覆盖 dist/SeavoExplorer.exe
+
+关闭正在运行的旧 EXE；资源管理器或杀毒软件短暂占用时等待几秒再试。不要手工删除不确定路径。
+
+### 构建环境不匹配
+
+按 `requirements-build.txt` 重建 Python 3.13.2 x64 虚拟环境。`--allow-unverified-env` 只用于本地兼容性试验，发布脚本不会使用它。
+
+### 二进制来源审计失败
+
+错误会列出外部 DLL 来源。不要把该目录加入允许列表；应检查虚拟环境、用户 site-packages 和 PATH 污染。包装器已设置 `PYTHONNOUSERSITE=1` 并只保留 Python/Windows PATH。
+
+### 隔离启动提前退出
+
+先检查 `build/main/warn-main.txt` 和 PE 依赖。冒烟临时目录会在失败后清理；若要查看运行时 `error_details.log`，应把产物复制到不含真实 sidecar 的独立临时目录后手工复现。不要因为日常 GUI 启动正常就忽略该错误；正式发布不允许使用 `--skip-smoke` 或 `--skip-tests`。

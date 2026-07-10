@@ -1,20 +1,20 @@
 # Build artifacts
 dist/
 build/
-backup/
-run/
-build_log.txt
-SeavoExplorer.spec
 error_details.log
+*.egg-info/
 
-# Generated icons (produced by make_ico.py from icon.jpg)
-favicon.ico
-favicon_src.png
+# Local icon backups; favicon.ico and favicon_src.png are required tracked inputs
 *.bak
 
-# PyInstaller
+# Python / local environments
 __pycache__/
 *.pyc
+.venv/
+.venv-build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Sidecar app state (generated at runtime)
 seavoexplorer.json
@@ -24,10 +24,11 @@ seavo_comments.json
 *.log
 *.part
 .claude/
-patch*.py
-archive_fix.txt
+.vscode/
+.idea/
+*.swp
+*.py~
 
-# Local-only files (not committed to GitHub)
+# Local assistant notes; AGENTS.md is the tracked repository-wide instruction file
 OHMYPI.md
-AGENTS.md
 PENDING-FIXES.md

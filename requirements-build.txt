@@ -1,0 +1,26 @@
+# -*- coding: utf-8 -*-
+# Windows x64 官方构建锁；对应 2026-07-10 实际跑通的 Python 3.13.2 环境。
+# 源码运行仍支持 Python >=3.8；其他构建环境只能用 --allow-unverified-env 显式试验。
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.2
+PyQt5-sip==12.18.0
+PyPDF2==3.0.1
+openpyxl==3.1.5
+et-xmlfile==2.0.0
+python-docx==1.1.2
+lxml==6.1.1
+typing-extensions==4.12.2
+xlrd==2.0.1
+olefile==0.47
+opencv-python==4.13.0.92
+numpy==2.2.2
+Pillow==11.1.0
+Send2Trash[nativeLib]==2.1.0
+pywin32==312
+PyInstaller==6.12.0
+pyinstaller-hooks-contrib==2025.1
+altgraph==0.17.4
+packaging==24.2
+pefile==2023.2.7
+pywin32-ctypes==0.2.3
+setuptools==75.8.0

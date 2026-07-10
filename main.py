@@ -74,7 +74,7 @@ def _is_regex_safe(pattern):
             return False, 'recursion limit'
     return True, ''
 
-APP_VERSION = '0.5.0'
+APP_VERSION = '0.5.1'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'

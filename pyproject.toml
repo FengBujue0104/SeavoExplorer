@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SeavoExplorer"
-version = "0.5.0"
+version = "0.5.1"
 description = "主板项目文件浏览器 — 用于浏览以 S/M 编号命名的硬件/PCB 项目文件夹"
 readme = "README.md"
 license = { text = "MIT" }
@@ -28,102 +28,15 @@ classifiers = [
     "Topic :: Desktop Environment",
     "Topic :: Utilities",
 ]
-
-dependencies = [
-    "PyQt5>=5.15.0",
-    "PyPDF2>=2.0.0",
-    "openpyxl>=3.0.0",
-    "python-docx>=0.8.11",
-    "xlrd>=2.0.0",
-    "olefile>=0.46",
-    "opencv-python>=4.5.0",
-    "numpy>=1.20.0",
-    "Pillow>=8.0.0",
-    "Send2Trash[nativeLib]==2.1.0",
-    "pyinstaller>=6.0.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "black",
-    "ruff",
-    "mypy",
-    "pytest",
-]
+dynamic = ["dependencies"]
 
 [project.urls]
 Homepage = "https://github.com/FengBujue0104/SeavoExplorer"
 Repository = "https://github.com/FengBujue0104/SeavoExplorer"
-Issues = "https://github.com/FengBujue0104/SeavoExplorer/releases"
-
-[project.scripts]
-seavoexplorer = "main:main"
+Issues = "https://github.com/FengBujue0104/SeavoExplorer/issues"
 
 [tool.setuptools]
-packages = ["."]
+py-modules = ["main"]
 
-[tool.black]
-line-length = 100
-target-version = ["py38"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py38"
-
-[tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_configs = true
-
-[tool.pyinstaller]
-onefile = true
-windowed = true
-name = "SeavoExplorer"
-icon = "favicon.ico"
-add-data = [
-    "favicon.ico;.",
-    "favicon_src.png;.",
-]
-hidden-imports = [
-    "PyQt5.QtWidgets",
-    "PyQt5.QtCore",
-    "PyQt5.QtGui",
-    "PyQt5.QtSvg",
-    "PyPDF2",
-    "openpyxl",
-    "docx",
-    "xlrd",
-    "olefile",
-    "cv2",
-    "numpy",
-    "PIL",
-    "send2trash.win.modern",
-    "send2trash.win.IFileOperationProgressSink",
-    "pythoncom",
-    "pywintypes",
-    "win32com.shell.shell",
-    "win32com.shell.shellcon",
-]
-exclude-modules = [
-    "rarfile",
-    "py7zr",
-    "PyQt5.QtWebEngine",
-    "PyQt5.QtWebEngineWidgets",
-    "PyQt5.QtMultimedia",
-    "PyQt5.QtMultimediaWidgets",
-    "PyQt5.QtSql",
-    "PyQt5.QtBluetooth",
-    "PyQt5.QtNetwork",
-    "PyQt5.QtXml",
-    "PyQt5.QtTest",
-    "PyQt5.QtDBus",
-    "PyQt5.QtQml",
-    "PyQt5.QtQuick",
-    "PyQt5.QtQuickWidgets",
-    "matplotlib",
-    "scipy",
-    "tornado",
-    "notebook",
-    "IPython",
-    "jupyter",
-]
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
