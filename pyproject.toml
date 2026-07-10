@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SeavoExplorer"
-version = "0.4.2"
+version = "0.5.0"
 description = "主板项目文件浏览器 — 用于浏览以 S/M 编号命名的硬件/PCB 项目文件夹"
 readme = "README.md"
 license = { text = "MIT" }
@@ -39,6 +39,7 @@ dependencies = [
     "opencv-python>=4.5.0",
     "numpy>=1.20.0",
     "Pillow>=8.0.0",
+    "Send2Trash[nativeLib]==2.1.0",
     "pyinstaller>=6.0.0",
 ]
 
@@ -96,6 +97,12 @@ hidden-imports = [
     "cv2",
     "numpy",
     "PIL",
+    "send2trash.win.modern",
+    "send2trash.win.IFileOperationProgressSink",
+    "pythoncom",
+    "pywintypes",
+    "win32com.shell.shell",
+    "win32com.shell.shellcon",
 ]
 exclude-modules = [
     "rarfile",

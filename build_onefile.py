@@ -30,7 +30,7 @@ print("========================================")
 print()
 
 run_step(
-    [sys.executable, "-m", "pip", "install", "pyinstaller", "PyQt5", "PyPDF2", "openpyxl", "python-docx", "xlrd", "olefile", "Pillow", "opencv-python", "numpy"],
+    [sys.executable, "-m", "pip", "install", "pyinstaller", "PyQt5", "PyPDF2", "openpyxl", "python-docx", "xlrd", "olefile", "Pillow", "opencv-python", "numpy", "Send2Trash[nativeLib]==2.1.0"],
     "依赖安装失败，请检查错误信息",
 )
 
@@ -63,6 +63,12 @@ cmd = [
     "--hidden-import=cv2",
     "--hidden-import=numpy",
     "--hidden-import=PIL",
+    "--hidden-import=send2trash.win.modern",
+    "--hidden-import=send2trash.win.IFileOperationProgressSink",
+    "--hidden-import=pythoncom",
+    "--hidden-import=pywintypes",
+    "--hidden-import=win32com.shell.shell",
+    "--hidden-import=win32com.shell.shellcon",
     "--exclude-module=rarfile",
     "--exclude-module=py7zr",
     "--exclude-module=PyQt5.QtWebEngine",
