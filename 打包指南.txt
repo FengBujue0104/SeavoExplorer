@@ -25,6 +25,7 @@ py -m pip install -r requirements.txt
 - python-docx / olefile：Word 预览
 - Pillow：图片处理和图标生成
 - opencv-python / numpy：视频缩略图生成
+- Send2Trash / pywin32：Windows 10/11 强制回收站接口，失败时不降级为永久删除
 - PyInstaller：打包工具
 
 说明：程序对 `.rar` / `.7z` 的预览和解压依赖外部 `7z.exe`，不是通过 `rarfile` 或 `py7zr` 打包进程序。请安装 7-Zip，或将 `7z.exe` 放在 exe 同目录，也可在程序内通过“设置 → 7-Zip路径设置”指定路径。
@@ -99,8 +100,9 @@ SeavoExplorer.exe
 如需创建 GitHub Release，可使用：
 
 ```bash
-py release.py v0.4.2
-py release.py --build v0.4.2
+py release.py v0.5.0
+py release.py --build v0.5.0
+```
 
 `--build` 会先运行 `build_onefile.py`，然后发布 `dist/SeavoExplorer.exe`。
 

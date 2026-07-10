@@ -3,11 +3,14 @@ import os
 import re
 import json
 import time
+import base64
 import socket
 import traceback
 import ctypes
 import shutil
+import stat
 import subprocess
+import tempfile
 import http.client
 import urllib.error
 import urllib.request
@@ -53,7 +56,25 @@ def _resolve_regex(state, custom_text, default_re):
         except re.error:
             return default_re, True
     return default_re, False
-APP_VERSION = '0.4.2'
+
+def _is_regex_safe(pattern):
+    """检测正则是否有 ReDoS（灾难性回溯）风险。"""
+    import time
+    try:
+        compiled = re.compile(pattern)
+    except re.error as e:
+        return False, str(e)
+    for test_str in ['A' * 50, 'a' * 50, '1' * 50, '_' * 50]:
+        start = time.monotonic()
+        try:
+            compiled.search(test_str)
+            if time.monotonic() - start > 0.5:
+                return False, 'match too slow'
+        except RuntimeError:
+            return False, 'recursion limit'
+    return True, ''
+
+APP_VERSION = '0.5.0'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -115,6 +136,656 @@ PREVIEW_CATEGORIES = (
     ('excel', '表格'),
     ('word', '文档'),
 )
+
+# 解压安全上限。所有内容先写入压缩包同目录的 staging，完整校验后才提交到最终位置。
+ARCHIVE_MAX_ENTRIES = 50000
+ARCHIVE_MAX_TOTAL_SIZE = 50 * 1024 * 1024 * 1024
+ARCHIVE_MAX_DEPTH = 64
+ARCHIVE_MAX_PATH_NODES = 200000
+ARCHIVE_MAX_PATH_CHARS = 32 * 1024 * 1024
+ARCHIVE_MAX_7Z_OUTPUT = 64 * 1024 * 1024
+ARCHIVE_MAX_COMPRESSION_RATIO = 1000
+ARCHIVE_RATIO_CHECK_MIN_SIZE = 100 * 1024 * 1024
+ARCHIVE_DISK_SAFETY_MIN = 512 * 1024 * 1024
+ARCHIVE_COPY_CHUNK_SIZE = 1024 * 1024
+FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+_WINDOWS_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *(f'COM{i}' for i in range(1, 10)),
+    *(f'LPT{i}' for i in range(1, 10)),
+}
+
+
+class ArchiveSafetyError(Exception):
+    """压缩包未通过安全预检或解压后校验。"""
+
+
+class ArchiveExtractionCanceled(Exception):
+    """用户取消了解压。"""
+
+
+ArchiveManifestEntry = namedtuple(
+    'ArchiveManifestEntry',
+    ['name', 'parts', 'size', 'is_dir', 'compressed_size', 'source'],
+)
+
+
+def _is_unc_path(path):
+    normalized = str(path or '').replace('/', '\\')
+    return normalized.startswith('\\\\')
+
+
+def _powershell_unc_location_args(folder_path):
+    """为 UNC 路径生成不含原始路径字符的安全 PowerShell 参数。"""
+    path_data = base64.b64encode(folder_path.encode('utf-8')).decode('ascii')
+    script = (
+        "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"
+        + path_data
+        + "'));Set-Location -LiteralPath $p"
+    )
+    encoded_script = base64.b64encode(script.encode('utf-16le')).decode('ascii')
+    return ['-NoLogo', '-NoProfile', '-NoExit', '-EncodedCommand', encoded_script]
+
+
+def _load_strict_recycle_backend():
+    """只加载 Win10/11 的现代回收站后端；不可用时安全失败，绝不降级永久删除。"""
+    if sys.platform != 'win32':
+        raise RuntimeError('回收站功能仅支持 Windows 10/11')
+    winver = sys.getwindowsversion()
+    if winver.major < 10:
+        raise RuntimeError('当前系统不支持强制回收站模式，已取消删除')
+    try:
+        from send2trash.win.modern import send2trash as modern_send2trash
+    except ImportError as e:
+        raise RuntimeError(
+            '缺少现代回收站组件，请安装 Send2Trash[nativeLib]==2.1.0'
+        ) from e
+    return modern_send2trash
+
+
+def _send_path_to_recycle_strict(path, backend=None):
+    """将单一路径强制送入回收站；任何异常都由调用方处理，不做删除回退。"""
+    recycle = backend or _load_strict_recycle_backend()
+    recycle(path)
+
+
+def _format_os_error(error):
+    """生成包含 Windows/errno 错误码的稳定用户提示。"""
+    code = getattr(error, 'winerror', None)
+    if code is None:
+        code = getattr(error, 'errno', None)
+    detail = getattr(error, 'strerror', None) or str(error) or '未知系统错误'
+    return f'系统错误 {code}: {detail}' if code is not None else f'系统错误: {detail}'
+
+
+def _normalize_archive_member_path(name):
+    """把归档内路径规范为安全的 Windows 相对路径组件元组。"""
+    if not isinstance(name, str):
+        raise ArchiveSafetyError('压缩包包含非文本路径')
+    if '\x00' in name:
+        raise ArchiveSafetyError('压缩包路径包含空字符')
+
+    normalized = name.replace('\\', '/')
+    if normalized.startswith('/') or normalized.startswith('//'):
+        raise ArchiveSafetyError(f'压缩包包含绝对路径: {name}')
+    if re.match(r'^[A-Za-z]:', normalized):
+        raise ArchiveSafetyError(f'压缩包包含盘符路径: {name}')
+    normalized = normalized.rstrip('/')
+    if not normalized:
+        raise ArchiveSafetyError('压缩包包含空路径')
+
+    parts = normalized.split('/')
+    if len(parts) > ARCHIVE_MAX_DEPTH:
+        raise ArchiveSafetyError(f'压缩包路径层级超过 {ARCHIVE_MAX_DEPTH}: {name}')
+
+    for part in parts:
+        if part in ('', '.', '..'):
+            raise ArchiveSafetyError(f'压缩包包含非法路径段: {name}')
+        if len(part) > 255:
+            raise ArchiveSafetyError(f'压缩包路径段过长: {name}')
+        if part.endswith((' ', '.')):
+            raise ArchiveSafetyError(f'压缩包路径含尾随空格或点: {name}')
+        if any(ord(ch) < 32 for ch in part) or any(ch in '<>:"|?*' for ch in part):
+            raise ArchiveSafetyError(f'压缩包路径包含 Windows 非法字符: {name}')
+        device_name = part.split('.', 1)[0].upper()
+        if device_name in _WINDOWS_RESERVED_NAMES:
+            raise ArchiveSafetyError(f'压缩包路径使用 Windows 保留名称: {name}')
+    return tuple(parts)
+
+
+def _archive_path_key(parts):
+    return tuple(part.casefold() for part in parts)
+
+
+def _build_archive_manifest(raw_entries, archive_size):
+    """校验归档条目并生成统一 manifest。raw entry 为字典。"""
+    if len(raw_entries) > ARCHIVE_MAX_ENTRIES:
+        raise ArchiveSafetyError(f'压缩包条目超过 {ARCHIVE_MAX_ENTRIES} 个')
+
+    manifest = []
+    path_types = {}
+    path_chars = 0
+    total_size = 0
+
+    def register_path(key, path_type):
+        nonlocal path_chars
+        existing_type = path_types.get(key)
+        if existing_type is not None:
+            return existing_type
+        if len(path_types) >= ARCHIVE_MAX_PATH_NODES:
+            raise ArchiveSafetyError(
+                f'压缩包唯一路径节点超过 {ARCHIVE_MAX_PATH_NODES} 个'
+            )
+        path_chars += sum(len(part) for part in key) + max(0, len(key) - 1)
+        if path_chars > ARCHIVE_MAX_PATH_CHARS:
+            raise ArchiveSafetyError(
+                f'压缩包路径文本总量超过 {ARCHIVE_MAX_PATH_CHARS // (1024 ** 2)} MiB'
+            )
+        path_types[key] = path_type
+        return None
+
+    for raw in raw_entries:
+        if raw.get('encrypted'):
+            raise ArchiveSafetyError(f"暂不支持加密条目: {raw.get('name', '')}")
+        if raw.get('is_link') or raw.get('is_special'):
+            raise ArchiveSafetyError(f"压缩包包含链接或特殊文件: {raw.get('name', '')}")
+
+        name = raw.get('name', '')
+        parts = _normalize_archive_member_path(name)
+        is_dir = bool(raw.get('is_dir'))
+        try:
+            size = int(raw.get('size') or 0)
+            compressed_size = int(raw.get('compressed_size') or 0)
+        except (TypeError, ValueError) as e:
+            raise ArchiveSafetyError(f'压缩包条目大小无效: {name}') from e
+        if size < 0 or compressed_size < 0:
+            raise ArchiveSafetyError(f'压缩包条目大小无效: {name}')
+
+        key = _archive_path_key(parts)
+        for depth in range(1, len(parts)):
+            parent_key = _archive_path_key(parts[:depth])
+            if path_types.get(parent_key) == 'file':
+                raise ArchiveSafetyError(f'压缩包中文件与子路径冲突: {name}')
+            register_path(parent_key, 'dir')
+
+        current_type = 'dir' if is_dir else 'file'
+        existing_type = register_path(key, current_type)
+        if existing_type is not None:
+            if existing_type == 'dir' and current_type == 'dir':
+                continue
+            raise ArchiveSafetyError(f'压缩包包含重复或大小写冲突路径: {name}')
+
+        if not is_dir:
+            total_size += size
+            if total_size > ARCHIVE_MAX_TOTAL_SIZE:
+                raise ArchiveSafetyError(
+                    f'压缩包展开总大小超过 {ARCHIVE_MAX_TOTAL_SIZE // (1024 ** 3)} GiB'
+                )
+            if (
+                size >= ARCHIVE_RATIO_CHECK_MIN_SIZE
+                and compressed_size > 0
+                and size / compressed_size > ARCHIVE_MAX_COMPRESSION_RATIO
+            ):
+                raise ArchiveSafetyError(f'压缩比异常，疑似压缩炸弹: {name}')
+
+        manifest.append(ArchiveManifestEntry(
+            name=name,
+            parts=parts,
+            size=size,
+            is_dir=is_dir,
+            compressed_size=compressed_size,
+            source=raw.get('source'),
+        ))
+
+    if not manifest:
+        raise ArchiveSafetyError('压缩包为空')
+    if (
+        total_size >= ARCHIVE_RATIO_CHECK_MIN_SIZE
+        and archive_size > 0
+        and total_size / archive_size > ARCHIVE_MAX_COMPRESSION_RATIO
+    ):
+        raise ArchiveSafetyError('压缩包总体压缩比异常，疑似压缩炸弹')
+    return manifest, total_size
+
+
+def _zip_raw_entries(zf):
+    entries = []
+    for info in zf.infolist():
+        mode = (info.external_attr >> 16) & 0xFFFF
+        file_type = stat.S_IFMT(mode)
+        is_link = stat.S_ISLNK(mode)
+        is_special = bool(file_type and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or is_link))
+        entries.append({
+            'name': _decode_zip_name(info.filename),
+            'size': info.file_size,
+            'compressed_size': info.compress_size,
+            'is_dir': info.is_dir(),
+            'encrypted': bool(info.flag_bits & 0x1),
+            'is_link': is_link,
+            'is_special': is_special,
+            'source': info,
+        })
+    return entries
+
+
+def _parse_7z_slt_output(output):
+    """解析 7z -slt 输出，并确保 EOF 前最后一个条目不会丢失。"""
+    entries = []
+    record = {}
+    in_entries = False
+
+    def flush_record():
+        nonlocal record
+        if not in_entries or 'Path' not in record:
+            record = {}
+            return
+        if len(entries) >= ARCHIVE_MAX_ENTRIES:
+            raise ArchiveSafetyError(f'压缩包条目超过 {ARCHIVE_MAX_ENTRIES} 个')
+        attrs = record.get('Attributes', '')
+        entries.append({
+            'name': record['Path'],
+            'size': record.get('Size', 0),
+            'compressed_size': record.get('Packed Size', 0),
+            'is_dir': record.get('Folder') == '+' or 'D' in attrs,
+            'encrypted': record.get('Encrypted') == '+',
+            'is_link': bool(record.get('Symbolic Link') or record.get('Hard Link')),
+            'is_special': record.get('Alternate Stream') == '+' or record.get('Anti') == '+',
+            'source': dict(record),
+        })
+        record = {}
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line == '----------':
+            flush_record()
+            in_entries = True
+            continue
+        if not line:
+            flush_record()
+            continue
+        if ' = ' not in line:
+            continue
+        key, value = line.split(' = ', 1)
+        if key in ('Size', 'Packed Size'):
+            try:
+                value = int(value)
+            except ValueError:
+                value = 0
+        record[key] = value
+    flush_record()
+    return entries
+
+
+def _archive_identity(path):
+    st = os.stat(path)
+    return st.st_size, st.st_mtime_ns
+
+
+def _ensure_archive_disk_space(parent_dir, total_size):
+    reserve = max(ARCHIVE_DISK_SAFETY_MIN, total_size // 10)
+    free = shutil.disk_usage(parent_dir).free
+    if free < total_size + reserve:
+        required = total_size + reserve
+        raise ArchiveSafetyError(
+            f'磁盘空间不足，至少需要 {required / (1024 ** 3):.2f} GiB 可用空间'
+        )
+
+
+def _safe_stage_target(stage_dir, parts):
+    target = os.path.join(stage_dir, *parts)
+    stage_real = os.path.realpath(stage_dir)
+    target_real = os.path.realpath(target)
+    try:
+        if os.path.commonpath([stage_real, target_real]) != stage_real:
+            raise ArchiveSafetyError('压缩包目标路径越过临时解压目录')
+    except ValueError as e:
+        raise ArchiveSafetyError('压缩包目标路径位于其他磁盘') from e
+    return target
+
+
+def _extract_zip_to_stage(zf, manifest, stage_dir, is_canceled, progress_callback):
+    total_written = 0
+    for index, entry in enumerate(manifest, 1):
+        if is_canceled():
+            raise ArchiveExtractionCanceled()
+        target_path = _safe_stage_target(stage_dir, entry.parts)
+        if entry.is_dir:
+            os.makedirs(target_path, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        file_written = 0
+        with zf.open(entry.source) as source, open(target_path, 'xb') as target:
+            while True:
+                if is_canceled():
+                    raise ArchiveExtractionCanceled()
+                chunk = source.read(ARCHIVE_COPY_CHUNK_SIZE)
+                if not chunk:
+                    break
+                file_written += len(chunk)
+                total_written += len(chunk)
+                if file_written > entry.size or total_written > ARCHIVE_MAX_TOTAL_SIZE:
+                    raise ArchiveSafetyError(f'条目展开大小与声明不符: {entry.name}')
+                target.write(chunk)
+        if file_written != entry.size:
+            raise ArchiveSafetyError(f'条目展开大小与声明不符: {entry.name}')
+        if progress_callback and (index == len(manifest) or index % 100 == 0):
+            progress_callback(f'正在解压：{index}/{len(manifest)}')
+
+
+def _validate_staged_tree(stage_dir, manifest, is_canceled=lambda: False):
+    expected_files = {}
+    expected_dirs = set()
+    for entry in manifest:
+        if is_canceled():
+            raise ArchiveExtractionCanceled()
+        key = _archive_path_key(entry.parts)
+        for depth in range(1, len(entry.parts)):
+            expected_dirs.add(_archive_path_key(entry.parts[:depth]))
+        if entry.is_dir:
+            expected_dirs.add(key)
+        else:
+            expected_files[key] = entry.size
+
+    actual_files = {}
+    actual_dirs = set()
+    stage_real = os.path.realpath(stage_dir)
+    for root, dirs, files in os.walk(stage_dir, followlinks=False):
+        if is_canceled():
+            raise ArchiveExtractionCanceled()
+        for names, is_dir in ((dirs, True), (files, False)):
+            for name in names:
+                if is_canceled():
+                    raise ArchiveExtractionCanceled()
+                path = os.path.join(root, name)
+                st = os.lstat(path)
+                if os.path.islink(path) or getattr(st, 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ArchiveSafetyError(f'解压结果包含链接或 reparse point: {name}')
+                real_path = os.path.realpath(path)
+                if os.path.commonpath([stage_real, real_path]) != stage_real:
+                    raise ArchiveSafetyError(f'解压结果越过临时目录: {name}')
+                rel = os.path.relpath(path, stage_dir).replace('\\', '/')
+                parts = _normalize_archive_member_path(rel)
+                key = _archive_path_key(parts)
+                if is_dir:
+                    actual_dirs.add(key)
+                else:
+                    actual_files[key] = st.st_size
+
+    if actual_files != expected_files:
+        raise ArchiveSafetyError('解压后的文件集合或大小与压缩包清单不一致')
+    if actual_dirs != expected_dirs:
+        raise ArchiveSafetyError('解压后的目录集合与压缩包清单不一致')
+
+
+def _unique_destination_candidates(parent_dir, name, is_dir):
+    yield os.path.join(parent_dir, name)
+    if is_dir:
+        stem, ext = name, ''
+    else:
+        stem, ext = os.path.splitext(name)
+    counter = 1
+    while counter <= 100000:
+        yield os.path.join(parent_dir, f'{stem} ({counter}){ext}')
+        counter += 1
+    raise ArchiveSafetyError('无法生成唯一的解压目标名称')
+
+
+def _rename_without_overwrite(source, parent_dir, name, is_dir):
+    for candidate in _unique_destination_candidates(parent_dir, name, is_dir):
+        if os.path.lexists(candidate):
+            continue
+        try:
+            os.rename(source, candidate)
+            return candidate
+        except FileExistsError:
+            continue
+        except OSError as e:
+            if getattr(e, 'winerror', None) in (80, 183):
+                continue
+            raise
+    raise ArchiveSafetyError('无法提交解压结果')
+
+
+def _commit_staged_extraction(stage_dir, parent_dir, archive_name):
+    top_items = os.listdir(stage_dir)
+    if not top_items:
+        raise ArchiveSafetyError('压缩包解压后没有内容')
+    if len(top_items) == 1:
+        name = top_items[0]
+        source = os.path.join(stage_dir, name)
+        destination = _rename_without_overwrite(source, parent_dir, name, os.path.isdir(source))
+        try:
+            os.rmdir(stage_dir)
+        except OSError:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        return destination, not os.path.exists(stage_dir)
+    destination = _rename_without_overwrite(stage_dir, parent_dir, archive_name or '解压内容', True)
+    return destination, True
+
+
+def _subprocess_window_options():
+    options = {}
+    if sys.platform == 'win32':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        options['startupinfo'] = startupinfo
+        options['creationflags'] = subprocess.CREATE_NO_WINDOW
+    return options
+
+
+def _run_7z_process(
+    cmd,
+    timeout,
+    is_canceled=lambda: False,
+    process_callback=None,
+    max_output_bytes=ARCHIVE_MAX_7Z_OUTPUT,
+):
+    """运行可取消的 7-Zip 命令，控制台输出固定为 UTF-8。"""
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            **_subprocess_window_options(),
+        )
+
+        def stop_process():
+            if process.poll() is not None:
+                return
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait()
+
+        deadline = time.monotonic() + timeout
+        try:
+            if process_callback:
+                process_callback(process)
+            while process.poll() is None:
+                if is_canceled():
+                    stop_process()
+                    raise ArchiveExtractionCanceled()
+                output_size = (
+                    os.fstat(stdout_file.fileno()).st_size
+                    + os.fstat(stderr_file.fileno()).st_size
+                )
+                if output_size > max_output_bytes:
+                    stop_process()
+                    raise ArchiveSafetyError(
+                        f'7-Zip 输出超过 {max_output_bytes // (1024 ** 2)} MiB 安全上限'
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stop_process()
+                    raise ArchiveSafetyError('7-Zip 操作超时')
+                try:
+                    process.wait(timeout=min(0.05, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+
+            output_size = (
+                os.fstat(stdout_file.fileno()).st_size
+                + os.fstat(stderr_file.fileno()).st_size
+            )
+            if output_size > max_output_bytes:
+                raise ArchiveSafetyError(
+                    f'7-Zip 输出超过 {max_output_bytes // (1024 ** 2)} MiB 安全上限'
+                )
+            if is_canceled():
+                raise ArchiveExtractionCanceled()
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read()
+            stderr = stderr_file.read()
+        except BaseException:
+            stop_process()
+            raise
+        finally:
+            if process_callback:
+                process_callback(None)
+
+    try:
+        stdout_text = stdout.decode('utf-8')
+        stderr_text = stderr.decode('utf-8')
+    except UnicodeDecodeError as e:
+        raise ArchiveSafetyError('7-Zip 输出不是有效 UTF-8，已停止处理') from e
+    if is_canceled():
+        raise ArchiveExtractionCanceled()
+    if process.returncode != 0:
+        detail = (stderr_text or stdout_text).strip()
+        if len(detail) > 2000:
+            detail = detail[-2000:]
+        raise ArchiveSafetyError(f'7-Zip 操作失败: {detail or process.returncode}')
+    return stdout_text
+
+
+def _inspect_7z_archive(
+    sevenzip,
+    archive_path,
+    is_canceled=lambda: False,
+    process_callback=None,
+):
+    cmd = [sevenzip, 'l', '-slt', '-sccUTF-8', '-p', '--', archive_path]
+    output = _run_7z_process(cmd, 120, is_canceled, process_callback)
+    return _parse_7z_slt_output(output)
+
+
+def _extract_7z_to_stage(
+    sevenzip,
+    archive_path,
+    stage_dir,
+    is_canceled=lambda: False,
+    process_callback=None,
+):
+    cmd = [
+        sevenzip, 'x', '-aos', '-p', '-bd', '-bb0', '-sccUTF-8',
+        f'-o{stage_dir}', '--', archive_path,
+    ]
+    _run_7z_process(cmd, 300, is_canceled, process_callback)
+
+
+def _transactional_extract_archive(
+    archive_path,
+    sevenzip=None,
+    is_canceled=lambda: False,
+    progress_callback=None,
+    process_callback=None,
+):
+    """安全解压到 staging，完整校验后以不覆盖方式提交，返回最终目标路径。"""
+    archive_path = os.path.abspath(archive_path)
+    if not os.path.isfile(archive_path):
+        raise ArchiveSafetyError('压缩包不存在')
+    ext = os.path.splitext(archive_path)[1].lower()
+    if ext not in ARCHIVE_EXTS:
+        raise ArchiveSafetyError(f'不支持的压缩包类型: {ext}')
+    if ext != '.zip' and not sevenzip:
+        raise ArchiveSafetyError('未找到7-Zip，请在设置中指定7z.exe路径或安装7-Zip')
+
+    parent_dir = os.path.dirname(archive_path)
+    archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+    identity_before = _archive_identity(archive_path)
+    manifest = None
+    total_size = 0
+    zip_file = None
+
+    if progress_callback:
+        progress_callback('正在检查压缩包安全性...')
+    try:
+        if ext == '.zip':
+            import zipfile
+            zip_file = zipfile.ZipFile(archive_path, 'r')
+            manifest, total_size = _build_archive_manifest(
+                _zip_raw_entries(zip_file),
+                identity_before[0],
+            )
+        else:
+            raw_entries = _inspect_7z_archive(
+                sevenzip,
+                archive_path,
+                is_canceled,
+                process_callback,
+            )
+            manifest, total_size = _build_archive_manifest(raw_entries, identity_before[0])
+
+        if _archive_identity(archive_path) != identity_before:
+            raise ArchiveSafetyError('压缩包在检查期间发生变化，已停止解压')
+        _ensure_archive_disk_space(parent_dir, total_size)
+        if is_canceled():
+            raise ArchiveExtractionCanceled()
+
+        stage_dir = tempfile.mkdtemp(prefix='.seavo-extract-', dir=parent_dir)
+        stage_consumed = False
+        try:
+            if progress_callback:
+                progress_callback('正在解压到安全临时目录...')
+            if ext == '.zip':
+                _extract_zip_to_stage(
+                    zip_file,
+                    manifest,
+                    stage_dir,
+                    is_canceled,
+                    progress_callback,
+                )
+            else:
+                _extract_7z_to_stage(
+                    sevenzip,
+                    archive_path,
+                    stage_dir,
+                    is_canceled,
+                    process_callback,
+                )
+            if _archive_identity(archive_path) != identity_before:
+                raise ArchiveSafetyError('压缩包在解压期间发生变化，已丢弃临时结果')
+            if is_canceled():
+                raise ArchiveExtractionCanceled()
+            if progress_callback:
+                progress_callback('正在校验并提交解压结果...')
+            _validate_staged_tree(stage_dir, manifest, is_canceled)
+            if is_canceled():
+                raise ArchiveExtractionCanceled()
+            destination, stage_consumed = _commit_staged_extraction(
+                stage_dir,
+                parent_dir,
+                archive_name,
+            )
+            return destination
+        finally:
+            if not stage_consumed and os.path.isdir(stage_dir):
+                shutil.rmtree(stage_dir, ignore_errors=True)
+    finally:
+        if zip_file is not None:
+            zip_file.close()
 
 
 def _first_available_font(candidates):
@@ -501,11 +1172,14 @@ class UpdateDownloadThread(QThread):
         return 0
 
     def _reset_partial(self):
+        """删除下载临时文件；成功或文件不存在返回 None，失败返回具体异常。"""
         try:
-            if os.path.exists(self.part_path):
-                os.remove(self.part_path)
-        except OSError:
-            pass
+            os.remove(self.part_path)
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            return e
+        return None
 
     def _download_once(self, attempt):
         existing = self._partial_size()
@@ -608,7 +1282,57 @@ class UpdateDownloadThread(QThread):
             message = f'GitHub 返回错误：HTTP {last_error.code}'
         elif isinstance(last_error, urllib.error.URLError):
             message = f'网络连接失败：{last_error.reason}'
+        cleanup_error = self._reset_partial()
+        if cleanup_error is not None:
+            message += (
+                f'\n下载临时文件未能清理：{self.part_path}'
+                f'\n{cleanup_error}'
+            )
         self.download_failed.emit(message)
+
+
+class ArchiveExtractThread(QThread):
+    """在后台执行事务式解压；取消时会中止 ZIP 复制或终止 7-Zip 子进程。"""
+    status_changed = pyqtSignal(str)
+    extract_completed = pyqtSignal(str)
+    extract_failed = pyqtSignal(str)
+    extract_canceled = pyqtSignal()
+
+    def __init__(self, archive_path, sevenzip=None, parent=None):
+        super().__init__(parent)
+        self.archive_path = archive_path
+        self.sevenzip = sevenzip
+        self._process = None
+
+    def _set_process(self, process):
+        self._process = process
+
+    def cancel(self):
+        self.requestInterruption()
+        process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+    def run(self):
+        try:
+            destination = _transactional_extract_archive(
+                self.archive_path,
+                sevenzip=self.sevenzip,
+                is_canceled=self.isInterruptionRequested,
+                progress_callback=self.status_changed.emit,
+                process_callback=self._set_process,
+            )
+            # 提交是最后一个原子步骤；一旦返回，磁盘结果已成功，之后到达的取消不能改报失败。
+            self.extract_completed.emit(destination)
+        except ArchiveExtractionCanceled:
+            self.extract_canceled.emit()
+        except Exception as e:
+            self.extract_failed.emit(str(e))
+        finally:
+            self._process = None
 
 
 class FolderScanThread(QThread):
@@ -617,6 +1341,9 @@ class FolderScanThread(QThread):
     scan_started = pyqtSignal()
     scan_progress = pyqtSignal(str)  # 发射当前扫描的目录
     
+    MAX_FILES = 50000
+    MAX_MATCHES_WARNING = 500
+
     def __init__(self, settings, include_subfolders, comments, sort_by_number=False, mb_regex=None, db_regex=None):
         super().__init__()
         self.settings = settings
@@ -771,12 +1498,12 @@ class FileSearchThread(QThread):
 
 
 class NewProjectDialog(QDialog):
-    def __init__(self, parent=None, default_folder='D:\资料'):
+    def __init__(self, parent=None, default_folder=None):
         super().__init__(parent)
         self.project_type = '主板'
         self.pcb_number = ''
         self.comment = ''
-        self.target_folder = default_folder  # 默认目标文件夹
+        self.target_folder = default_folder or os.path.expanduser('~')
         self.parent_window = parent
         self.setWindowTitle('新建项目文件夹')
         self.setGeometry(300, 300, 500, 300)
@@ -1274,6 +2001,8 @@ class SettingsDialog(_ReorderableTableDialog):
         self.regex_custom_rb = QRadioButton('自定义正则')
         regex_layout.addWidget(self.regex_default_rb)
         regex_layout.addWidget(self.regex_custom_rb)
+        self.regex_custom_rb.clicked.connect(lambda checked: self._on_regex_mode_changed('custom'))
+        self.regex_default_rb.clicked.connect(lambda checked: self._on_regex_mode_changed('default'))
         
         # 主板正则输入
         mb_row = QHBoxLayout()
@@ -1295,8 +2024,6 @@ class SettingsDialog(_ReorderableTableDialog):
         test_row = QHBoxLayout()
         self.regex_test_btn = QPushButton('测试')
         self.regex_test_btn.clicked.connect(self._test_regex)
-        self.regex_custom_rb.clicked.connect(lambda: self._on_regex_mode_changed('custom'))
-        self.regex_default_rb.clicked.connect(lambda: self._on_regex_mode_changed('default'))
         test_row.addWidget(self.regex_test_btn)
         test_row.addStretch()
         regex_layout.addLayout(test_row)
@@ -1324,14 +2051,6 @@ class SettingsDialog(_ReorderableTableDialog):
         # 初始化 UI 状态
         self._refresh_regex_ui()
         
-    def _on_regex_mode_changed(self, state):
-        """Radio button 切换时同步 regex_state 并刷新 UI。
-        
-        state: 'custom' 或 'default'，由调用者直接传入，避免 toggled 双重信号导致状态覆盖。
-        """
-        self.regex_state = state
-        self._refresh_regex_ui()
-
     def _refresh_regex_ui(self):
         """根据 self.regex_state 同步 UI 状态和编辑框内容。"""
         is_custom = self.regex_state == 'custom'
@@ -1343,6 +2062,13 @@ class SettingsDialog(_ReorderableTableDialog):
         self.regex_db_edit.setEnabled(is_custom)
         self.regex_test_btn.setEnabled(is_custom)
         self._test_regex()
+
+    def _on_regex_mode_changed(self, state):
+        print(f'DEBUG: _on_regex_mode_changed called with state={state}')
+        self.regex_state = state
+        self._refresh_regex_ui()
+        print(f'DEBUG: regex_state={self.regex_state}, mb_edit enabled={self.regex_mb_edit.isEnabled()}')
+
 
     def _test_regex(self):
         """实时验证两个自定义正则并更新状态标签。"""
@@ -1407,6 +2133,86 @@ class SettingsDialog(_ReorderableTableDialog):
     def get_settings(self):
         return self.paths, self.include_subfolders, self.sort_by_number, self.show_hidden, self.regex_state, self.custom_mb_regex, self.custom_db_regex
 
+
+class SevenZipSettingsDialog(QDialog):
+    """配置 RAR/7Z 预览授权，以及预览和解压共用的 7z.exe 路径。"""
+
+    def __init__(self, current_path='', enable_7zip=False, parent=None):
+        super().__init__(parent)
+        self.archive_tool_path = str(current_path or '')
+        self.enable_7zip = bool(enable_7zip)
+        self.setWindowTitle('7-Zip 设置')
+        self.setMinimumWidth(560)
+
+        layout = QVBoxLayout()
+
+        self.enable_checkbox = QCheckBox('启用 .rar / .7z 的 7-Zip 预览')
+        self.enable_checkbox.setChecked(self.enable_7zip)
+        layout.addWidget(self.enable_checkbox)
+
+        warning_label = QLabel(
+            '安全提示：启用后，预览 .rar / .7z 时会启动外部 7z.exe。'
+            '请仅使用可信来源的官方 7-Zip，及时更新，并谨慎处理来源不明的压缩包。'
+        )
+        warning_label.setWordWrap(True)
+        warning_label.setStyleSheet('color: #8a4b08;')
+        layout.addWidget(warning_label)
+
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(QLabel('7z.exe 路径：'))
+        self.path_edit = QLineEdit(self.archive_tool_path)
+        self.path_edit.setPlaceholderText('留空时自动检测 7-Zip 安装位置')
+        browse_btn = QPushButton('浏览...')
+        browse_btn.clicked.connect(self.browse_path)
+        path_layout.addWidget(self.path_edit, 1)
+        path_layout.addWidget(browse_btn)
+        layout.addLayout(path_layout)
+
+        button_layout = QHBoxLayout()
+        save_btn = QPushButton('保存设置')
+        save_btn.clicked.connect(self.save_settings)
+        cancel_btn = QPushButton('取消')
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(save_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def browse_path(self):
+        current = self.path_edit.text().strip().strip('"')
+        start_dir = os.path.dirname(current) if current else ''
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            '选择 7z.exe',
+            start_dir,
+            '7-Zip 可执行文件 (7z.exe);;可执行文件 (*.exe)',
+        )
+        if file_path:
+            self.path_edit.setText(file_path)
+
+    def save_settings(self):
+        raw_path = self.path_edit.text().strip().strip('"')
+        enable_7zip = self.enable_checkbox.isChecked()
+        archive_tool_path = ''
+        if raw_path:
+            archive_tool_path = os.path.abspath(
+                os.path.normpath(os.path.expandvars(os.path.expanduser(raw_path)))
+            )
+            if enable_7zip and not os.path.isfile(archive_tool_path):
+                QMessageBox.warning(self, '路径无效', '指定的 7z.exe 文件不存在。')
+                return
+            if enable_7zip and os.path.basename(archive_tool_path).casefold() != '7z.exe':
+                QMessageBox.warning(self, '路径无效', '请选择名称为 7z.exe 的可执行文件。')
+                return
+
+        self.archive_tool_path = archive_tool_path
+        self.enable_7zip = enable_7zip
+        self.accept()
+
+    def get_settings(self):
+        return self.archive_tool_path, self.enable_7zip
 
 
 class QuickAccessSettingsDialog(_ReorderableTableDialog):
@@ -1705,6 +2511,8 @@ class MainWindow(QMainWindow):
         self.comments = self.load_comments() or {}
         self.clipboard_path = None
         self.clipboard_paths = []
+        self._extract_jobs = {}
+        self._close_after_extract_cancel = False
 
         self.settings = self.load_settings()
         
@@ -1864,7 +2672,12 @@ class MainWindow(QMainWindow):
         self.preview_button.clicked.connect(self._on_preview_button_clicked)
         self.preview_layout.addWidget(self.preview_button)
         self.preview_button.hide()
-        self._pending_preview_path = None
+        self._manual_preview_path = None
+        self._scheduled_preview_path = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(250)
+        self._preview_timer.timeout.connect(self._execute_pending_preview)
         
         # 图片预览
         self.image_scroll_area = QScrollArea()
@@ -1921,11 +2734,6 @@ class MainWindow(QMainWindow):
         self.folder_stats_label = QLabel('')
         self.folder_stats_label.setStyleSheet('color: #555; padding: 0 8px;')
         self.statusBar().addPermanentWidget(self.folder_stats_label)
-        # 正则状态标签（显示当前匹配规则，fallback 时变红）
-        self.regex_status_label = QLabel('')
-        self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
-        self.statusBar().addPermanentWidget(self.regex_status_label)
-        self._refresh_regex_status()
         # 在状态栏右侧添加回收站按钮
         self.statusBar().addPermanentWidget(self._create_recycle_btn())
 
@@ -2018,6 +2826,8 @@ class MainWindow(QMainWindow):
         self.project_paths = []
         self.include_subfolders = False
         self.sort_by_number = False
+        self.archive_tool_path = ''
+        self.enable_7zip = False
         self.default_new_project_folder = os.path.expanduser("~")
         self.folder_structure = {
             'version': '00',
@@ -2110,6 +2920,8 @@ class MainWindow(QMainWindow):
                 self.folder_structure = config_data['folder_structure']
             if 'archive_tool_path' in config_data:
                 self.archive_tool_path = config_data['archive_tool_path']
+            enable_7zip = config_data.get('enable_7zip', False)
+            self.enable_7zip = enable_7zip if isinstance(enable_7zip, bool) else False
             if 'quick_access_paths' in config_data:
                 self.quick_access_paths = config_data['quick_access_paths']
             if 'pinned_folders' in config_data:
@@ -2185,6 +2997,7 @@ class MainWindow(QMainWindow):
                 'include_subfolders': include_subfolders,
                 'sort_by_number': getattr(self, 'sort_by_number', False),
                 'archive_tool_path': getattr(self, 'archive_tool_path', ''),
+                'enable_7zip': bool(getattr(self, 'enable_7zip', False)),
                 'quick_access_paths': getattr(self, 'quick_access_paths', []),
                 'pinned_folders': getattr(self, 'pinned_folders', []),
                 'hidden_folders': getattr(self, 'hidden_folders', []),
@@ -2208,7 +3021,7 @@ class MainWindow(QMainWindow):
             elif hasattr(self, 'default_new_project_folder'):
                 config_data['default_new_project_folder'] = self.default_new_project_folder
             else:
-                config_data['default_new_project_folder'] = 'D:\资料'
+                config_data['default_new_project_folder'] = os.path.expanduser('~')
             if self.safe_write_json(self.CONFIG_FILE, config_data):
                 return True
             else:
@@ -2266,11 +3079,13 @@ class MainWindow(QMainWindow):
             new_paths, new_include_subfolders, new_sort_by_number, new_show_hidden, new_regex_state, new_custom_mb_regex, new_custom_db_regex = dialog.get_settings()
             self.sort_by_number = new_sort_by_number
             self.show_hidden = new_show_hidden
+            self.regex_state = new_regex_state
+            self.custom_mb_regex = new_custom_mb_regex
+            self.custom_db_regex = new_custom_db_regex
             if self.save_settings_to_file(new_paths, new_include_subfolders):
                 self.settings = new_paths
                 self.include_subfolders = new_include_subfolders
                 QMessageBox.information(self, '成功', '设置已保存')
-                self._refresh_regex_status()
                 self.load_filtered_folders()
                 # 刷新文件树以应用隐藏文件设置
                 if self.current_folder:
@@ -2289,12 +3104,22 @@ class MainWindow(QMainWindow):
     
     def show_7zip_settings_dialog(self):
         """显示7-Zip设置对话框"""
-        dialog = SevenZipSettingsDialog(self.archive_tool_path, self)
+        dialog = SevenZipSettingsDialog(
+            current_path=self.archive_tool_path,
+            enable_7zip=getattr(self, 'enable_7zip', False),
+            parent=self,
+        )
         if dialog.exec_():
-            new_path = dialog.get_settings()
+            new_path, new_enable = dialog.get_settings()
+            old_path = self.archive_tool_path
+            old_enable = getattr(self, 'enable_7zip', False)
             self.archive_tool_path = new_path
-            self.save_settings_to_file(self.settings, self.include_subfolders)
-            QMessageBox.information(self, '成功', '7-Zip路径设置已保存')
+            self.enable_7zip = new_enable
+            if self.save_settings_to_file(self.settings, self.include_subfolders):
+                QMessageBox.information(self, '成功', '7-Zip 设置已保存')
+            else:
+                self.archive_tool_path = old_path
+                self.enable_7zip = old_enable
 
     def show_preview_settings_dialog(self):
         """显示预览开关对话框：分别控制各类文件的自动预览。"""
@@ -2586,71 +3411,95 @@ class MainWindow(QMainWindow):
         valid_paths = []
         seen = set()
         for file_path in file_paths:
-            normalized_path = os.path.normpath(file_path)
-            if os.path.exists(file_path) and normalized_path not in seen:
+            absolute_path = os.path.abspath(file_path)
+            normalized_path = os.path.normcase(os.path.normpath(absolute_path))
+            if os.path.exists(absolute_path) and normalized_path not in seen:
                 seen.add(normalized_path)
-                valid_paths.append(os.path.abspath(file_path))
+                valid_paths.append(absolute_path)
+
+        # 同时选中父目录和其子项时只处理父目录，避免父目录已回收后子项被误报失败。
+        filtered_paths = []
+        for path in valid_paths:
+            nested = False
+            for other in valid_paths:
+                if path == other:
+                    continue
+                try:
+                    if os.path.commonpath([path, other]) == other:
+                        nested = True
+                        break
+                except ValueError:
+                    continue
+            if not nested:
+                filtered_paths.append(path)
+        valid_paths = filtered_paths
 
         if not valid_paths:
             QMessageBox.warning(self, '警告', '没有可移入回收站的文件或文件夹')
             return False
 
-        # 二次确认：删除是静默的（FOF_NOCONFIRMATION|FOF_SILENT），自行弹确认避免误删
         if len(valid_paths) == 1:
-            prompt = f'确定将以下项目移入回收站？\n\n{os.path.basename(valid_paths[0])}'
+            prompt = (
+                f'确定将以下项目移入回收站？\n\n{os.path.basename(valid_paths[0])}'
+                '\n\n若该位置不支持回收站，操作会失败并保留原文件。'
+            )
         else:
             names = '\n'.join('· ' + os.path.basename(p) for p in valid_paths[:10])
             if len(valid_paths) > 10:
                 names += f'\n… 等共 {len(valid_paths)} 个项目'
-            prompt = f'确定将以下 {len(valid_paths)} 个项目移入回收站？\n\n{names}'
+            prompt = (
+                f'确定将以下 {len(valid_paths)} 个项目移入回收站？\n\n{names}'
+                '\n\n若某个位置不支持回收站，该项目会保留并单独报告失败。'
+            )
         if QMessageBox.question(self, '确认删除', prompt,
                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return False
 
         try:
-            from ctypes import wintypes
-
-            class SHFILEOPSTRUCT(ctypes.Structure):
-                _fields_ = [
-                    ("hwnd", wintypes.HWND),
-                    ("wFunc", wintypes.UINT),
-                    ("pFrom", ctypes.c_wchar_p),
-                    ("pTo", ctypes.c_wchar_p),
-                    ("fFlags", wintypes.WORD),
-                    ("fAnyOperationsAborted", wintypes.BOOL),
-                    ("hNameMappings", wintypes.LPVOID),
-                    ("lpszProgressTitle", ctypes.c_wchar_p)
-                ]
-
-            SHFileOperation = ctypes.windll.shell32.SHFileOperationW
-            FO_DELETE = 0x0003
-            FOF_ALLOWUNDO = 0x0040
-            FOF_NOCONFIRMATION = 0x0010
-            FOF_SILENT = 0x0004
-            # 过滤路径中的空字符，避免 SHFileOperation 的 pFrom 字符串被截断
-            valid_paths = [p.replace('\x00', '') for p in valid_paths]
-            p_from = '\x00'.join(valid_paths) + '\x00\x00'
-
-
-            shfo = SHFILEOPSTRUCT()
-            shfo.hwnd = int(self.winId())
-            shfo.wFunc = FO_DELETE
-            shfo.pFrom = p_from
-            shfo.pTo = None
-            shfo.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
-
-            result = SHFileOperation(ctypes.byref(shfo))
-            if result == 0:
-                if len(valid_paths) == 1:
-                    self.statusBar().showMessage(f"已移入回收站: {os.path.basename(valid_paths[0])}")
-                else:
-                    self.statusBar().showMessage(f"已移入回收站: {len(valid_paths)} 个项目")
-                return True
-
-            QMessageBox.warning(self, "错误", f"移入回收站失败，错误码: {result}")
+            backend = _load_strict_recycle_backend()
+        except OSError as e:
+            QMessageBox.warning(
+                self,
+                '错误',
+                f'无法启用安全回收站功能：{_format_os_error(e)}',
+            )
+            return False
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"移入回收站失败: {str(e)}")
-        return False
+            QMessageBox.warning(self, '错误', f'无法启用安全回收站功能：{str(e)}')
+            return False
+
+        successes = []
+        failures = []
+        for path in valid_paths:
+            try:
+                _send_path_to_recycle_strict(path, backend=backend)
+                successes.append(path)
+            except OSError as e:
+                failures.append((path, _format_os_error(e)))
+            except Exception as e:
+                failures.append((path, str(e)))
+
+        if failures:
+            details = '\n'.join(
+                f'· {os.path.basename(path)}：{message or "无法进入回收站"}'
+                for path, message in failures[:10]
+            )
+            if len(failures) > 10:
+                details += f'\n… 另有 {len(failures) - 10} 项失败'
+            QMessageBox.warning(
+                self,
+                '部分项目未删除' if successes else '移入回收站失败',
+                '以下项目未能进入回收站，程序没有执行永久删除：\n\n' + details,
+            )
+
+        if successes:
+            if len(successes) == 1:
+                self.statusBar().showMessage(
+                    f'已移入回收站: {os.path.basename(successes[0])}'
+                )
+            else:
+                self.statusBar().showMessage(f'已移入回收站: {len(successes)} 个项目')
+        return bool(successes)
 
     def _create_recycle_btn(self):
         """创建回收站按钮"""
@@ -2757,11 +3606,21 @@ class MainWindow(QMainWindow):
         self.scan_thread.scan_completed.connect(self.on_scan_completed)
         self.scan_thread.scan_progress.connect(self.on_scan_progress)
         self.scan_thread.start()
-        self._refresh_regex_status()
 
     def closeEvent(self, event):
         """退出时确保后台线程已结束，避免 QThread 被销毁时仍在运行。
         统一处理:disconnect 信号 → requestInterruption → quit → wait → deleteLater。"""
+        running_extracts = [
+            thread for thread in getattr(self, '_extract_jobs', {}) if thread.isRunning()
+        ]
+        if running_extracts:
+            self._close_after_extract_cancel = True
+            for thread in running_extracts:
+                thread.cancel()
+            self.statusBar().showMessage('正在取消解压并清理临时文件，完成后将自动退出...')
+            event.ignore()
+            return
+
         # 下载线程单独处理(结构不同,无 _signal_map 中的信号)
         update_thread = getattr(self, 'update_download_thread', None)
         if update_thread is not None:
@@ -3464,35 +4323,33 @@ class MainWindow(QMainWindow):
 
     
     def on_file_clicked(self, index):
-        self._cancel_pending_preview()
+        self._reset_preview()
         file_path = self.file_model.filePath(index)
         file_info = self.file_model.fileInfo(index)
         self.extract_metadata(file_info)
         self._update_breadcrumb_for_item(file_path, file_info)
         if file_info.isFile():
-            self._pending_preview_path = file_path
-            self._preview_timer = QTimer.singleShot(250, self._execute_pending_preview)
-        else:
-            self._reset_preview()
+            self._scheduled_preview_path = file_path
+            self._preview_timer.start()
 
     def _cancel_pending_preview(self):
         """取消已安排的待处理预览，避免与双击冲突。"""
-        if getattr(self, '_preview_timer', None) is not None:
+        timer = getattr(self, '_preview_timer', None)
+        if timer is not None:
             try:
-                self._preview_timer.stop()
-            except Exception:
+                if timer.isActive():
+                    timer.stop()
+            except RuntimeError:
                 pass
-            self._preview_timer = None
-        self._pending_preview_path = None
+        self._scheduled_preview_path = None
 
     def _execute_pending_preview(self):
         """执行待处理的预览，如果路径仍然有效且窗口未关闭。"""
-        path = getattr(self, '_pending_preview_path', None)
-        self._preview_timer = None
+        path = getattr(self, '_scheduled_preview_path', None)
+        self._scheduled_preview_path = None
         # 窗口已关闭时不访问 GUI 对象
         if self.isVisible() and path and os.path.exists(path):
             self.preview_file(path)
-        self._pending_preview_path = None
 
 
     def _update_breadcrumb_for_item(self, file_path, file_info):
@@ -3823,9 +4680,13 @@ class MainWindow(QMainWindow):
         import sys
         
         # 优先使用用户指定的路径
-        if hasattr(self, 'archive_tool_path') and self.archive_tool_path:
-            if os.path.exists(self.archive_tool_path):
-                return self.archive_tool_path
+        configured_path = getattr(self, 'archive_tool_path', '')
+        if (
+            isinstance(configured_path, str)
+            and os.path.basename(configured_path).casefold() == '7z.exe'
+            and os.path.isfile(configured_path)
+        ):
+            return configured_path
         
         # 7z.exe 可能的位置
         sevenzip_paths = []
@@ -3844,150 +4705,104 @@ class MainWindow(QMainWindow):
         ])
         
         for path in sevenzip_paths:
-            if os.path.exists(path):
+            if os.path.isfile(path):
                 return path
         
         return None
     
     def _extract_with_7z(self, archive_path, extract_dir):
-        """使用7-Zip解压文件"""
-        import subprocess
-        
+        """兼容接口：仅允许解压到空目录，且不覆盖任何已存在条目。"""
         sevenzip = self._find_7z_tool()
         if not sevenzip:
-            raise Exception('未找到7-Zip，请在设置中指定7z.exe路径或安装7-Zip')
-        
-        cmd = [sevenzip, 'x', archive_path, f'-o{extract_dir}', '-y', '-p']
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='gbk', errors='ignore', startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW, timeout=300)
-        except subprocess.TimeoutExpired:
-            raise Exception('7-Zip 解压超时（可能压缩包损坏、需要密码或路径不可达）')
-
-        if result.returncode != 0:
-            raise Exception(f'7-Zip解压失败: {result.stderr or result.stdout}')
-
+            raise ArchiveSafetyError('未找到7-Zip，请在设置中指定7z.exe路径或安装7-Zip')
+        os.makedirs(extract_dir, exist_ok=True)
+        if os.listdir(extract_dir):
+            raise ArchiveSafetyError('安全解压要求目标临时目录为空')
+        _extract_7z_to_stage(sevenzip, archive_path, extract_dir)
         return True
     
     def _list_archive_with_7z(self, archive_path):
-        """使用7-Zip列出压缩包内容"""
-        import subprocess
-        import re
-        
+        """使用 UTF-8 7-Zip 输出列出压缩包内容，供只读预览使用。"""
+        if not getattr(self, 'enable_7zip', False):
+            raise ArchiveSafetyError('7-Zip 压缩包预览尚未启用')
         sevenzip = self._find_7z_tool()
         if not sevenzip:
-            raise Exception('未找到7-Zip')
-        
-        cmd = [sevenzip, 'l', '-slt', '-p', archive_path]
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='gbk', errors='ignore', startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW, timeout=120)
-        except subprocess.TimeoutExpired:
-            raise Exception('读取压缩包超时（可能压缩包损坏、需要密码或路径不可达）')
-
-        if result.returncode != 0:
-            raise Exception(f'读取压缩包失败: {result.stderr or result.stdout}')
-
-        items = []
-        lines = result.stdout.split('\n')
-        current_item = {}
-        # 7z -slt 输出先是描述压缩包自身的头部块，'----------' 分隔线之后才是包内条目
-        in_entries = False
-
-        for line in lines:
-            line = line.strip()
-            if line == '----------':
-                in_entries = True
-                current_item = {}
-                continue
-            if line.startswith('Path = '):
-                current_item['path'] = line[7:]
-            elif line.startswith('Size = '):
-                current_item['size'] = int(line[7:]) if line[7:].isdigit() else 0
-            elif line.startswith('Attributes = '):
-                attrs = line[13:]
-                current_item['is_dir'] = 'D' in attrs
-            elif line == '' and 'path' in current_item:
-                # 仅收集分隔线之后的真实条目，头部块（压缩包自身）天然被排除
-                if in_entries:
-                    items.append((current_item['path'], current_item.get('size', 0), current_item.get('is_dir', False)))
-                current_item = {}
-
-        return items
+            raise ArchiveSafetyError('未找到7-Zip')
+        entries = _inspect_7z_archive(sevenzip, archive_path)
+        return [(item['name'], int(item.get('size') or 0), bool(item.get('is_dir'))) for item in entries]
     
     def smart_extract(self, archive_path):
-        """智能解压：单文件/单文件夹直接解压，多文件则创建同名文件夹"""
-        try:
-            ext = os.path.splitext(archive_path)[1].lower()
-            parent_dir = os.path.dirname(archive_path)
-            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
-            
-            # 获取压缩包内容列表
-            items = []
-            if ext == '.zip':
-                import zipfile
-                with zipfile.ZipFile(archive_path, 'r') as zf:
-                    for info in zf.infolist():
-                        filename = _decode_zip_name(info.filename)
-                        items.append((filename, info.file_size, info.is_dir()))
-            elif ext in ['.rar', '.7z']:
-                # 使用7-Zip处理RAR和7z
-                items = self._list_archive_with_7z(archive_path)
-            
-            if not items:
-                QMessageBox.warning(self, '警告', '压缩包为空')
+        """后台执行事务式智能解压；既有目标自动改名，绝不覆盖。"""
+        archive_path = os.path.abspath(archive_path)
+        ext = os.path.splitext(archive_path)[1].lower()
+        if ext not in ARCHIVE_EXTS or not os.path.isfile(archive_path):
+            QMessageBox.warning(self, '错误', '请选择有效的 zip、rar 或 7z 压缩包')
+            return
+        sevenzip = None
+        if ext in ('.rar', '.7z'):
+            sevenzip = self._find_7z_tool()
+            if not sevenzip:
+                QMessageBox.warning(
+                    self,
+                    '错误',
+                    '未找到7-Zip，请在设置中指定7z.exe路径或安装7-Zip',
+                )
                 return
-            
-            # 分析顶层项目
-            top_items = set()
-            for filename, size, is_dir in items:
-                path = filename.replace('\\', '/')
-                if path.endswith('/'):
-                    top_items.add(path.rstrip('/').split('/')[0])
-                else:
-                    top_items.add(path.split('/')[0])
-            
-            # 决定解压路径
-            if len(top_items) == 1:
-                extract_dir = parent_dir
+
+        progress = QProgressDialog('正在准备安全解压...', '取消', 0, 0, self)
+        progress.setWindowTitle('安全解压')
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        thread = ArchiveExtractThread(archive_path, sevenzip, self)
+        result = {'state': None, 'value': None}
+        self._extract_jobs[thread] = progress
+
+        def mark_completed(destination):
+            result['state'] = 'completed'
+            result['value'] = destination
+
+        def mark_failed(message):
+            result['state'] = 'failed'
+            result['value'] = message
+
+        def mark_canceled():
+            result['state'] = 'canceled'
+
+        def cancel_extract():
+            thread.cancel()
+            self.statusBar().showMessage('正在取消解压并清理临时文件...')
+
+        def finish_job():
+            job_progress = self._extract_jobs.pop(thread, None)
+            if job_progress is not None:
+                job_progress.close()
+                job_progress.deleteLater()
+            state = result['state']
+            if state == 'completed':
+                destination = result['value']
+                self.statusBar().showMessage(f'已安全解压到: {destination}')
+            elif state == 'failed':
+                QMessageBox.warning(self, '解压失败', str(result['value']))
+            elif state == 'canceled':
+                self.statusBar().showMessage('已取消解压，临时文件已清理')
             else:
-                extract_dir = os.path.join(parent_dir, archive_name)
-                os.makedirs(extract_dir, exist_ok=True)
-            
-            # 执行解压
-            if ext == '.zip':
-                import zipfile
-                with zipfile.ZipFile(archive_path, 'r') as zf:
-                    for info in zf.infolist():
-                        filename = _decode_zip_name(info.filename)
+                QMessageBox.warning(self, '解压失败', '解压线程异常结束')
+            thread.deleteLater()
+            if self._close_after_extract_cancel and not self._extract_jobs:
+                self._close_after_extract_cancel = False
+                QTimer.singleShot(0, self.close)
 
-                        target_path = os.path.join(extract_dir, filename)
-
-                        # 防 Zip-slip：归档内文件名可能含 ../，校验解压目标必须在 extract_dir 内
-                        real_extract_dir = os.path.realpath(extract_dir)
-                        real_target = os.path.realpath(target_path)
-                        if real_target != real_extract_dir and not real_target.startswith(real_extract_dir + os.sep):
-                            raise Exception(f'压缩包包含非法路径，已阻止解压: {filename}')
-
-                        if info.is_dir():
-                            os.makedirs(target_path, exist_ok=True)
-                        else:
-                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                            # 分块读写，避免大文件一次性读入内存导致 OOM
-                            with zf.open(info) as source, open(target_path, 'wb') as target:
-                                shutil.copyfileobj(source, target, 1 << 20)
-            elif ext in ['.rar', '.7z']:
-                # 防 traversal：校验解压目标必须在 extract_dir 内
-                # 7z/RAR 无法在解压前逐条校验路径，因此用 -o 严格限定输出目录
-                self._extract_with_7z(archive_path, extract_dir)
-            
-            self.statusBar().showMessage(f"已解压到: {extract_dir}")
-        except Exception as e:
-            QMessageBox.warning(self, "错误", f"解压失败: {str(e)}")
+        thread.status_changed.connect(progress.setLabelText)
+        thread.extract_completed.connect(mark_completed)
+        thread.extract_failed.connect(mark_failed)
+        thread.extract_canceled.connect(mark_canceled)
+        thread.finished.connect(finish_job)
+        progress.canceled.connect(cancel_extract)
+        thread.start()
+        progress.show()
     
     def _update_folder_status_bar(self):
         """更新状态栏显示当前项目文件夹信息"""
@@ -4093,55 +4908,92 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "错误", f"无法打开网页：\n{url}\n\n{str(e)}")
 
     def _terminal_launch_candidates(self, folder_path):
-        """按优先级生成终端启动命令：Windows Terminal → PowerShell → cmd。"""
-        return [
-            ('Windows 终端', 'wt.exe', ['wt.exe', '-d', folder_path]),
-            ('PowerShell', 'powershell.exe', [
-                'powershell.exe', '-NoExit', '-ExecutionPolicy', 'Bypass',
-                '-Command', f'Set-Location -LiteralPath {folder_path!r}'
-            ]),
-            ('命令提示符', 'cmd.exe', ['cmd.exe', '/K', 'cd', '/d', folder_path]),
-        ]
+        """生成安全的终端候选；路径只作为 cwd 或独立 argv，不拼入命令文本。"""
+        system_root = os.environ.get('SystemRoot', r'C:\Windows')
+        local_app_data = os.environ.get('LOCALAPPDATA', '')
+        is_unc = _is_unc_path(folder_path)
+        candidates = []
 
-    def _shell_execute_terminal(self, command, as_admin):
-        """通过 ShellExecuteW 启动终端；as_admin=True 时请求 UAC 提权。"""
-        executable = command[0]
-        params = subprocess.list2cmdline(command[1:])
-        verb = 'runas' if as_admin else 'open'
-        result = ctypes.windll.shell32.ShellExecuteW(None, verb, executable, params, None, 1)
+        if local_app_data:
+            wt_path = os.path.join(local_app_data, 'Microsoft', 'WindowsApps', 'wt.exe')
+            if os.path.exists(wt_path):
+                # wt 的 -d 接受独立 argv；同时传 cwd，确保本地路径和支持 UNC 的版本都正确落点。
+                candidates.append(('Windows 终端', wt_path, ['-d', folder_path], folder_path))
+
+        powershell_path = os.path.join(
+            system_root,
+            'System32',
+            'WindowsPowerShell',
+            'v1.0',
+            'powershell.exe',
+        )
+        if os.path.exists(powershell_path):
+            if is_unc:
+                # Win32 进程 cwd 不能可靠表示 UNC；用 EncodedCommand 安全设置 PowerShell provider 路径。
+                ps_args = _powershell_unc_location_args(folder_path)
+                ps_working_dir = os.path.expanduser('~')
+            else:
+                ps_args = ['-NoLogo', '-NoProfile', '-NoExit']
+                ps_working_dir = folder_path
+            candidates.append(('PowerShell', powershell_path, ps_args, ps_working_dir))
+
+        # cmd.exe 原生不支持 UNC 当前目录；UNC 时宁可明确失败，也不打开到错误位置。
+        if not is_unc:
+            cmd_path = os.path.join(system_root, 'System32', 'cmd.exe')
+            if os.path.exists(cmd_path):
+                candidates.append(('命令提示符', cmd_path, ['/D'], folder_path))
+        return candidates
+
+    def _shell_execute_terminal(self, executable, args, working_directory):
+        """通过 ShellExecuteW 启动终端，working_directory 是所选路径。"""
+        from ctypes import wintypes
+
+        params = subprocess.list2cmdline(args) if args else None
+        shell_execute = ctypes.windll.shell32.ShellExecuteW
+        shell_execute.argtypes = [
+            wintypes.HWND,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+        ]
+        shell_execute.restype = ctypes.c_ssize_t
+        result = shell_execute(
+            int(self.winId()),
+            'open',
+            executable,
+            params,
+            working_directory or None,
+            1,
+        )
         if result <= 32:
             raise OSError(f'ShellExecuteW 返回错误码 {result}')
 
     def open_folder_in_terminal(self, folder_path):
-        """在指定文件夹打开终端，优先管理员身份，失败后回退普通用户身份。"""
-        folder_path = os.path.normpath(folder_path)
+        """以普通权限在指定文件夹打开终端，并确保启动位置与所选路径一致。"""
+        folder_path = os.path.abspath(os.path.normpath(folder_path))
         if not os.path.isdir(folder_path):
             QMessageBox.warning(self, '警告', f'文件夹不存在：{folder_path}')
             return False
 
         last_error = None
-        for terminal_name, _exe_name, command in self._terminal_launch_candidates(folder_path):
-            admin_error = None
+        candidates = self._terminal_launch_candidates(folder_path)
+        for terminal_name, executable, args, working_directory in candidates:
             try:
-                self._shell_execute_terminal(command, as_admin=True)
-                self.statusBar().showMessage(f'已以管理员身份在终端中打开: {folder_path}')
-                return True
-            except Exception as e:
-                admin_error = e
-                last_error = e
-
-            try:
-                self._shell_execute_terminal(command, as_admin=False)
-                self.statusBar().showMessage(f'已在{terminal_name}中打开: {folder_path}')
+                self._shell_execute_terminal(executable, args, working_directory)
+                self.statusBar().showMessage(
+                    f'已在{terminal_name}中打开所选路径: {folder_path}'
+                )
                 return True
             except Exception as e:
                 last_error = e
-                if _exe_name.lower() == 'wt.exe':
-                    continue
-                if admin_error:
-                    break
-
-        QMessageBox.warning(self, '错误', f'无法在终端中打开文件夹：{folder_path}\n{last_error}')
+        detail = str(last_error) if last_error else '未找到可用的终端程序'
+        QMessageBox.warning(
+            self,
+            '错误',
+            f'无法在终端中打开所选路径：{folder_path}\n{detail}',
+        )
         return False
 
     def on_file_double_clicked(self, index):
@@ -4394,6 +5246,9 @@ class MainWindow(QMainWindow):
         return result
 
     def _preview_archive(self, file_path, ext):
+        if ext in ('.rar', '.7z') and not getattr(self, 'enable_7zip', False):
+            self._preview_7z_disabled_hint(file_path)
+            return
         try:
             archive_info = f'压缩包: {os.path.basename(file_path)}\n\n'
             files_list = []
@@ -4499,6 +5354,17 @@ class MainWindow(QMainWindow):
                         pass
             self.preview_tab.setPlainText(content)
 
+    def _preview_7z_disabled_hint(self, file_path):
+        """在未授权 7-Zip 预览时显示说明，不探测工具也不读取压缩包。"""
+        self.preview_tab.setPlainText(
+            '7-Zip 压缩包预览未启用\n\n'
+            f'文件: {os.path.basename(file_path)}\n\n'
+            '程序尚未读取此 .rar / .7z 压缩包。\n'
+            '如需预览，请打开“设置 → 7-Zip路径设置”，确认 7z.exe 来源可信后启用。\n'
+            '建议使用最新版本的官方 7-Zip，并仅处理来源可信的压缩包。\n\n'
+            '.zip 文件使用程序内置能力预览，不受此开关影响。'
+        )
+
     def _preview_binary(self, file_path, ext):
         content = f'文件: {os.path.basename(file_path)}\n\n不支持的文件格式: {ext}\n\n文件前1000字节:\n\n'
         with open(file_path, 'rb') as f:
@@ -4537,19 +5403,25 @@ class MainWindow(QMainWindow):
         """隐藏预览区域，改为显示一个按钮，点击后才加载预览。"""
         self.preview_tab.hide()
         self.image_scroll_area.hide()
-        self._pending_preview_path = file_path
+        self._manual_preview_path = file_path
         self.preview_button.setText(f'显示预览（{type_name}）：{os.path.basename(file_path)}')
         self.preview_button.show()
 
     def _on_preview_button_clicked(self):
-        path = self._pending_preview_path
-        if path and os.path.exists(path):
-            self.preview_button.hide()
-            self._do_preview(path)
+        path = getattr(self, '_manual_preview_path', None)
+        if not path or not os.path.exists(path):
+            self._reset_preview()
+            if path:
+                self.preview_tab.setPlainText('文件已不存在，无法显示预览。')
+            return
+        self._manual_preview_path = None
+        self.preview_button.hide()
+        self._do_preview(path)
 
     def _reset_preview(self):
         """恢复预览区域到文本视图并清空，隐藏按钮与图片区域。"""
-        self._pending_preview_path = None
+        self._cancel_pending_preview()
+        self._manual_preview_path = None
         self.preview_button.hide()
         self.image_scroll_area.hide()
         self.preview_tab.show()
@@ -4557,6 +5429,7 @@ class MainWindow(QMainWindow):
 
     def _do_preview(self, file_path):
         try:
+            self._manual_preview_path = None
             ext = os.path.splitext(file_path)[1].lower()
             text_exts = TEXT_EXTS
             image_exts = IMAGE_EXTS
@@ -4580,7 +5453,10 @@ class MainWindow(QMainWindow):
             elif ext in video_exts:
                 self._preview_video(file_path)
             elif ext in archive_exts:
-                self._preview_archive(file_path, ext)
+                if ext in ('.rar', '.7z') and not getattr(self, 'enable_7zip', False):
+                    self._preview_7z_disabled_hint(file_path)
+                else:
+                    self._preview_archive(file_path, ext)
             elif ext in ['.xlsx', '.xlsm', '.xls']:
                 self._preview_excel(file_path, ext)
             elif ext in ['.docx', '.doc']:
@@ -4916,18 +5792,6 @@ class MainWindow(QMainWindow):
             self.statusBar().clearMessage()
 
 
-    def _refresh_regex_status(self):
-        """状态栏显示当前正则来源，fallback 时红色警告。"""
-        if getattr(self, 'regex_state', 'default') == 'default':
-            self.regex_status_label.setText('正则: 默认')
-            self.regex_status_label.setStyleSheet('color: #555; padding: 0 8px;')
-        elif getattr(self, '_regex_fallback', False):
-            self.regex_status_label.setText('正则: ⚠ 回退')
-            self.regex_status_label.setStyleSheet('color: #c0392b; padding: 0 8px;')
-        else:
-            self.regex_status_label.setText('正则: 自定义')
-            self.regex_status_label.setStyleSheet('color: #27ae60; padding: 0 8px;')
-
     def show_about(self):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
@@ -4995,7 +5859,7 @@ class MainWindow(QMainWindow):
 <li>点击 <b>帮助 → 检查更新</b>，程序会读取 GitHub Releases 上的最新版本并与当前版本比较。</li>
 <li>发现新版本时，弹窗会显示版本号、更新文件大小和发布页链接，可选择 <b>下载更新</b> 或 <b>浏览器打开</b>。</li>
 <li>程序内下载会在后台进行，进度窗口显示下载量、速度和预计剩余时间；网络中断时会自动重试，已有临时文件时会尽量断点续传。</li>
-<li>取消或失败时会保留 <code>.part</code> 临时文件，稍后再次下载同一文件可继续利用已下载部分。</li>
+<li>取消时会保留 <code>.part</code> 临时文件以便稍后续传；下载最终失败后会清理临时文件，避免长期占用磁盘。</li>
 <li>如果 GitHub 连接较慢或下载失败，可使用弹窗中的发布页链接，在浏览器中手动下载最新 <code>SeavoExplorer.exe</code>。</li>
 </ul>
 
@@ -5044,7 +5908,7 @@ class MainWindow(QMainWindow):
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
-<li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并优先尝试管理员身份</li>
+<li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并始终定位到所选路径</li>
 </ul>
 <p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>添加到zip压缩包</b>、<b>归档到old文件夹</b>、<b>移入回收站</b>。</p>
 <p>在<b>空白处</b>右键：仅显示<b>粘贴副本</b>，粘贴到当前项目文件夹。</p>
@@ -5467,6 +6331,6 @@ if __name__ == '__main__':
         try:
             with open(os.path.join(_get_app_dir(), 'error_details.log'), 'w', encoding='utf-8') as f:
                 f.write(error_msg)
-        except:
+        except Exception:
             pass
         sys.exit(1)

@@ -5,8 +5,8 @@ SeavoExplorer 一键发布脚本
 
 用法：
     py release.py            # 交互式输入版本号
-    py release.py v0.4.2     # 直接指定版本号
-    py release.py --build v0.4.2   # 先运行打包再发布
+    py release.py v0.5.0     # 直接指定版本号
+    py release.py --build v0.5.0   # 先运行打包再发布
 
 依赖：已安装并登录 GitHub CLI（gh auth login），git 远程为 origin。
 """
@@ -18,6 +18,7 @@ import subprocess
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 REPO = "FengBujue0104/SeavoExplorer"
+APP_NAME = "SeavoExplorer"
 EXE = "dist/SeavoExplorer.exe"
 
 
@@ -97,7 +98,7 @@ def main():
     # 6. 确认版本号
     version = positional[0].strip() if positional else ""
     if not version:
-        version = input("\n请输入版本号（如 v0.4.2）：").strip()
+        version = input("\n请输入版本号（如 v0.5.0）：").strip()
     if not version:
         fail("未提供版本号。")
     if not version.startswith("v"):
@@ -126,12 +127,15 @@ def main():
     notes = (
         f"## {APP_NAME} {version}\n\n"
         f"### 新增功能\n\n"
-        f"- **保存版本**：右键文件选择「保存版本」，自动生成 `文件名_YYYYMMDD[后缀].ext` 的日期版本副本，当天多次保存自动递增字母后缀（a/b/c...）\n"
-        f"- **归档到 old 文件夹**：右键选择「归档到old文件夹」，将选中文件移入同目录下的 `old/` 子文件夹（自动创建），支持多选批量归档\n\n"
-        f"### 修复\n\n"
-        f"- **F5 刷新文件树**：修复 QFileSystemModel 缓存导致文件树不更新的问题\n"
-        f"- **右键重命名失效**：修复菜单 action dispatch 缺失导致右键重命名无效的问题\n"
-        f"- 打包配置统一：`main.spec` 输出名与其他脚本对齐为 `SeavoExplorer.exe`\n\n"
+        f"- 支持自定义主板/子卡项目正则，并提供安全校验与默认规则回退\n"
+        f"- 新增文件版本副本、old 文件夹归档、隐藏文件显示和窗口状态恢复\n"
+        f"- 新增安全的 RAR/7Z 预览授权与事务式智能解压\n\n"
+        f"### 安全与稳定性\n\n"
+        f"- 终端始终在所选路径启动，移除路径命令拼接和默认提权\n"
+        f"- 回收站失败时保留源文件，绝不降级为永久删除\n"
+        f"- 解压采用同盘 staging、完整校验和不覆盖提交\n"
+        f"- 修复关闭自动预览后“显示预览”按钮无效及延迟预览无法取消的问题\n"
+        f"- 更新下载最终失败时清理临时文件，并保留主动取消后的续传数据\n\n"
         f"### 下载\n"
         f"下方 `SeavoExplorer.exe` 为 Windows 单文件可执行程序，"
         f"下载即用，无需安装 Python 环境。"
