@@ -154,8 +154,10 @@ git status --short
 - 已发布页面：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.5.0
 - 已发布 v0.5.0 EXE SHA-256：`AF2E7C3C9780CE1F6D002BC4215F98FCE5F4141428816579F068AB6412B12A70`。
 - 不得用后续本地重新构建的不同哈希静默替换既有 v0.5.0 资产。
+- annotated tag `v0.5.1` 指向 `c0b71a0`，发布页为：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.5.1
+- 已发布 v0.5.1 EXE 为 96,926,112 bytes，SHA-256：`126134AF93E31344768B847760B25FFE56F24C966AC36EE5216003D51B661937`。
+- draft→三资产 digest 核验→publish 自动化已随 v0.5.1 完成首次真实 GitHub 端到端发布；三个远端资产均已核对 digest。
 - 新构建会写入 PE FileVersion/ProductVersion；这不等于 Authenticode 签名。当前没有签名证书。
-- 新的 draft→三资产 digest 核验→publish/resume 自动化已通过无网络单元测试，但尚未随下一版本做真实 GitHub 端到端发布；报告时不得把本地测试表述成实发验证。
 - 自定义正则安全检查尚未接入实际链路，是后续产品代码风险，不得通过修改文档掩盖。
 
 交付时明确报告修改文件、实际执行的检查、构建产物哈希和未执行事项；不要把“语法可解析”表述成“GUI 功能已验证”。

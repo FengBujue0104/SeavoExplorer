@@ -4,6 +4,10 @@
 
 Windows 单文件版可从 [v0.5.1 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.5.1) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
 
+```text
+126134AF93E31344768B847760B25FFE56F24C966AC36EE5216003D51B661937
+```
+
 ---
 
 ## 适用范围
