@@ -66,7 +66,7 @@ python -m venv .venv-build
 5. 在同一净化环境中运行 `python -m unittest -q test_safety.py test_tooling.py`（当前共 57 项）。
 6. 以净化后的 PATH 调用 `python -m PyInstaller --noconfirm --clean main.spec`。
 7. 审计 `Analysis-00.toc`：二进制来源只允许仓库、当前 Python 和 Windows 系统目录，避免 MiKTeX 等全局 PATH 中的 DLL 混入。
-8. 把 EXE 复制到临时目录，以净化 PATH 和 Qt offscreen 模式做 6 秒隔离启动冒烟；不会读取真实 sidecar 配置，也不会借用宿主机的外部 Qt 插件或 DLL 路径。
+8. 把 EXE 复制到临时目录，以净化 PATH 和 Qt offscreen 模式做 6 秒隔离启动冒烟；结束时终止完整 PyInstaller 进程树，不会读取真实 sidecar 配置，也不会借用宿主机的外部 Qt 插件或 DLL 路径。
 9. 生成 SHA-256 和绑定 commit/dirty/严格环境/完整输入哈希/检查结果的 build manifest；诊断模式产物不能用于 Release。
 
 输出：

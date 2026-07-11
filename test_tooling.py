@@ -291,6 +291,34 @@ class PathAndHashTests(unittest.TestCase):
         for name in ('PYTHONPATH', 'PYTHONHOME', 'QT_PLUGIN_PATH', 'QML2_IMPORT_PATH'):
             self.assertNotIn(name, environment)
 
+        smoke_process = mock.Mock()
+        smoke_process.pid = 1234
+        smoke_process.poll.return_value = None
+        cleanup_result = SimpleNamespace(returncode=0)
+        smoke_root = os.path.join(build_support.ROOT_DIR, 'build')
+        smoke_directory = os.path.join(smoke_root, 'seavo-build-smoke-test')
+        with mock.patch.object(build_support.sys, 'platform', 'win32'):
+            with mock.patch.object(build_support.os.path, 'isfile', return_value=True):
+                with mock.patch.object(build_support, '_is_smoke_directory', return_value=True):
+                    with mock.patch.object(
+                        build_support.subprocess,
+                        'run',
+                        return_value=cleanup_result,
+                    ) as run_cleanup:
+                        build_support._stop_smoke_process(
+                            smoke_process,
+                            smoke_directory,
+                            smoke_root,
+                        )
+        cleanup_command = run_cleanup.call_args.args[0]
+        self.assertTrue(cleanup_command[0].casefold().endswith('powershell.exe'))
+        self.assertIn('Get-SmokeProcesses', cleanup_command[-1])
+        self.assertEqual(
+            run_cleanup.call_args.kwargs['env']['SEAVO_SMOKE_ROOT'],
+            smoke_directory,
+        )
+        smoke_process.wait.assert_called_once_with(timeout=10)
+
     def test_onedir_checksum_rejects_directory_links_and_walk_errors(self):
         with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
             linked_directory = os.path.join(root, 'linked')

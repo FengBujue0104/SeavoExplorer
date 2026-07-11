@@ -758,6 +758,72 @@ def _cleanup_stale_smoke_directories(smoke_root):
                 print('[警告] 旧冒烟目录仍被占用：{}'.format(path))
 
 
+def _stop_smoke_process(process, smoke_directory, smoke_root):
+    """按可执行路径终止冒烟进程及其 PyInstaller onefile 子进程。"""
+    if sys.platform == 'win32':
+        if not _is_smoke_directory(smoke_directory, smoke_root):
+            raise BuildError('拒绝终止意外目录中的进程：{}'.format(smoke_directory))
+        system_root = os.environ.get('SystemRoot', r'C:\Windows')
+        powershell = os.path.join(
+            system_root,
+            'System32',
+            'WindowsPowerShell',
+            'v1.0',
+            'powershell.exe',
+        )
+        if not os.path.isfile(powershell):
+            raise BuildError('无法找到 Windows PowerShell：{}'.format(powershell))
+        script = (
+            "$root = [IO.Path]::GetFullPath($env:SEAVO_SMOKE_ROOT).TrimEnd('\\') + '\\'; "
+            '$comparison = [StringComparison]::OrdinalIgnoreCase; '
+            'function Get-SmokeProcesses { '
+            '  @(Get-Process -Name SeavoExplorer -ErrorAction SilentlyContinue | '
+            '    Where-Object { '
+            '      try { '
+            '        [IO.Path]::GetFullPath($_.Path).StartsWith($root, $comparison) '
+            '      } catch { $false } '
+            '    }) '
+            '}; '
+            '$matches = @(Get-SmokeProcesses); '
+            'if ($matches.Count -gt 0) { '
+            '  $matches | Stop-Process -Force -ErrorAction Stop '
+            '}; '
+            'Start-Sleep -Milliseconds 250; '
+            'if (@(Get-SmokeProcesses).Count -ne 0) { exit 3 }'
+        )
+        cleanup_env = runtime_subprocess_environment()
+        cleanup_env['SEAVO_SMOKE_ROOT'] = smoke_directory
+        try:
+            result = subprocess.run(
+                [powershell, '-NoProfile', '-NonInteractive', '-Command', script],
+                env=cleanup_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise BuildError('无法终止隔离冒烟进程树') from error
+        if result.returncode != 0:
+            raise BuildError(
+                'Windows 进程树终止失败，退出码 {}'.format(result.returncode)
+            )
+        if process.poll() is None:
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired as error:
+                raise BuildError('隔离冒烟进程树未在超时前退出') from error
+        return
+
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
 def smoke_test_distribution(target_name):
     target = BUILD_TARGETS[target_name]
     entrypoint = os.path.join(ROOT_DIR, target['entrypoint'])
@@ -797,13 +863,7 @@ def smoke_test_distribution(target_name):
                     )
                 time.sleep(0.25)
         finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=10)
+            _stop_smoke_process(process, temp_dir, smoke_root)
     finally:
         # Windows Defender/杀毒软件可能在进程退出后短暂锁定刚生成的 EXE。冒烟结果
         # 不应因临时副本无法立即清理而变成失败；本次退避重试，后续冒烟也会清旧目录。
