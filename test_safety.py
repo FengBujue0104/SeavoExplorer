@@ -177,6 +177,41 @@ class PreviewResourceTests(unittest.TestCase):
         app.processEvents()
 
 
+class ExclusiveFileCopyTests(unittest.TestCase):
+    def test_existing_destination_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = os.path.join(root, 'source.txt')
+            destination = os.path.join(root, 'destination.txt')
+            with open(source, 'w', encoding='utf-8') as stream:
+                stream.write('NEW')
+            with open(destination, 'w', encoding='utf-8') as stream:
+                stream.write('OLD')
+            with self.assertRaises(FileExistsError):
+                main._copy_file_exclusive(source, destination)
+            self.assertEqual(read_text(destination), 'OLD')
+            self.assertFalse(any(name.endswith(".tmp") for name in os.listdir(root)))
+
+class PersistenceSafetyTests(unittest.TestCase):
+    def test_comments_save_is_blocked_after_read_failure(self):
+        stub = SimpleNamespace(_comments_load_failed=True, comments={'a': 'b'})
+        stub.safe_write_json = mock.Mock(return_value=True)
+        stub.save_comments = main.MainWindow.save_comments.__get__(stub)
+        with mock.patch.object(main.QMessageBox, 'warning') as warning:
+            self.assertFalse(stub.save_comments())
+        stub.safe_write_json.assert_not_called()
+        warning.assert_called_once()
+
+    def test_safe_write_json_leaves_no_predictable_temp_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'data.json')
+            stub = SimpleNamespace(make_file_hidden=lambda *args: None)
+            stub.safe_write_json = main.MainWindow.safe_write_json.__get__(stub)
+            self.assertTrue(stub.safe_write_json(path, {'value': 1}))
+            self.assertTrue(stub.safe_write_json(path, {'value': 2}))
+            with open(path, encoding="utf-8") as stream:
+                self.assertEqual(json.load(stream), {"value": 2})
+            self.assertFalse(any(name.endswith('.tmp') for name in os.listdir(root)))
+
 class SaveFileVersionTests(unittest.TestCase):
     def _save_version_with_files(self, filenames):
         with tempfile.TemporaryDirectory() as root:
@@ -1093,6 +1128,12 @@ class RegexSafetyRegressionTests(unittest.TestCase):
                 self.assertFalse(ok, pattern)
                 self.assertIn('回溯', error)
 
+    def test_rejects_adjacent_unbounded_repeats(self):
+        pattern = r'^S(\d{3})(a*a*a*a*a*a*a*a*a*a*)b$'
+        ok, error = main._validate_project_regex(pattern)
+        self.assertFalse(ok)
+        self.assertIn('回溯', error)
+
     def test_rejects_backreference_repeat(self):
         ok, error = main._validate_project_regex(r'^(a+)\1+$')
         self.assertFalse(ok)
@@ -1252,6 +1293,23 @@ class ZipCreationTests(unittest.TestCase):
             self.assertEqual(zipfile.ZipFile(zip_path).namelist(), ['only.txt'])
 
 
+    def test_parent_and_child_selection_deduplicates_and_excludes_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            tree = os.path.join(root, 'tree')
+            inner = os.path.join(tree, 'inner')
+            os.makedirs(inner)
+            child = os.path.join(inner, 'f.txt')
+            with open(child, 'w', encoding='utf-8') as stream:
+                stream.write('x')
+            stub = self._stub()
+            stub.statusBar = lambda: SimpleNamespace(showMessage=lambda *args: None)
+            stub.add_paths_to_zip = main.MainWindow.add_paths_to_zip.__get__(stub)
+            stub.add_paths_to_zip([tree, child])
+            zip_path = os.path.join(root, '选中文件.zip')
+            names = zipfile.ZipFile(zip_path).namelist()
+            self.assertEqual(names, ['tree/', 'tree/inner/', 'tree/inner/f.txt'])
+            self.assertEqual(len(names), len(set(names)))
+
 class FolderStructureNormalizationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1328,6 +1386,28 @@ class FolderThreadErrorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = main.QApplication.instance() or main.QApplication([])
+
+    def test_walk_error_does_not_also_emit_success(self):
+        def failing_walk(root, onerror=None):
+            if onerror:
+                onerror(PermissionError("injected traversal failure"))
+            return iter(())
+
+        with mock.patch.object(main.os, 'walk', side_effect=failing_walk):
+            stats = main.FolderStatsThread('IN_MEMORY_ONLY', 9)
+            events = []
+            stats.stats_ready.connect(lambda *args: events.append(('ready', args)))
+            stats.stats_error.connect(lambda *args: events.append(('error', args)))
+            stats.run()
+        self.assertEqual([event[0] for event in events], ['error'])
+
+        with mock.patch.object(main.os, 'walk', side_effect=failing_walk):
+            search = main.FileSearchThread('IN_MEMORY_ONLY', 10, '', None, None)
+            events = []
+            search.search_ready.connect(lambda *args: events.append(('ready', args)))
+            search.search_error.connect(lambda *args: events.append(('error', args)))
+            search.run()
+        self.assertEqual([event[0] for event in events], ['error'])
 
     def test_missing_root_emits_error_for_stats(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1519,6 +1599,39 @@ class UpdateModeTests(unittest.TestCase):
             self.assertEqual(len(backups), 1)
             with open(os.path.join(root, backups[0]), 'rb') as stream:
                 self.assertEqual(stream.read(), b'OLD')
+
+    def test_replace_executable_preserves_backup_if_rollback_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = os.path.join(root, 'target.exe')
+            source = os.path.join(root, 'source.exe')
+            with open(target, 'wb') as stream:
+                stream.write(b'OLD')
+            with open(source, 'wb') as stream:
+                stream.write(b'NEW')
+            real_replace = main.os.replace
+            calls = []
+
+            def flaky_replace(src, dst):
+                calls.append((os.path.basename(src), os.path.basename(dst)))
+                if src == target:
+                    return real_replace(src, dst)
+                if dst == target and os.path.basename(src).startswith(".SeavoExplorer-update-"):
+                    raise PermissionError("injected install failure")
+                if dst == target and src.endswith(".old"):
+                    raise PermissionError("injected rollback failure")
+                return real_replace(src, dst)
+
+            with mock.patch.object(main.sys, 'platform', 'linux'):
+                with mock.patch.object(main.os, 'replace', side_effect=flaky_replace):
+                    ok, error = main._replace_executable(target, source, retries=2)
+            backup = target + ".old"
+            self.assertFalse(ok, error)
+            self.assertFalse(os.path.exists(target))
+            self.assertTrue(os.path.isfile(backup))
+            with open(backup, "rb") as stream:
+                self.assertEqual(stream.read(), b'OLD')
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(any(name.startswith(".SeavoExplorer-update-") for name in os.listdir(root)))
 
     def test_replace_executable_rejects_same_path(self):
         with tempfile.TemporaryDirectory() as root:

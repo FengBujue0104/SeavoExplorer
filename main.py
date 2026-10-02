@@ -380,6 +380,22 @@ def _regex_node_has_repeated_group(node):
     return False
 
 
+def _regex_sequence_has_adjacent_repeats(nodes):
+    """Reject adjacent large/unbounded repeat quantifiers.
+
+    Patterns such as a*a*a*b have many equivalent backtracking paths even
+    though each individual atom is simple.  The check is deliberately
+    conservative: it only rejects consecutive variable-length repetitions.
+    """
+    previous_repeated = False
+    for node in nodes:
+        repeated = _regex_quantifier_is_repeated(node.quantifier)
+        if repeated and previous_repeated:
+            return True
+        previous_repeated = repeated
+    return False
+
+
 def _regex_node_is_unsafe(node):
     if node.kind == 'group' and _regex_quantifier_is_repeated(node.quantifier):
         if node.has_alternation:
@@ -391,6 +407,8 @@ def _regex_node_is_unsafe(node):
     if node.kind == 'backref' and _regex_quantifier_is_repeated(node.quantifier):
         return True
     if node.kind == 'group':
+        if _regex_sequence_has_adjacent_repeats(node.children):
+            return True
         return any(_regex_node_is_unsafe(child) for child in node.children)
     return False
 
@@ -412,13 +430,15 @@ def _is_regex_safe(pattern):
         return False, str(e)
     try:
         nodes, _has_alternation, _end = _regex_parse_sequence(pattern, 0, False)
+        if _regex_sequence_has_adjacent_repeats(nodes):
+            return False, 'adjacent large/unbounded repeat quantifiers'
         if any(_regex_node_is_unsafe(node) for node in nodes):
             return False, 'repeated group with variable-length body'
         return True, ''
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.2'
+APP_VERSION = '0.6.3'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -459,6 +479,11 @@ def _get_path_mapping_value(mapping, path, default=None):
     key = _path_identity(path)
     if not key:
         return default
+    if path in mapping:
+        return mapping[path]
+    normalized = _normalize_persisted_path(path)
+    if normalized in mapping:
+        return mapping[normalized]
     for stored_path, value in mapping.items():
         if _path_identity(stored_path) == key:
             return value
@@ -508,6 +533,65 @@ def _normalize_path_list(paths):
         if normalized and key not in seen:
             seen.add(key)
             result.append(normalized)
+    return result
+
+
+def _copy_file_exclusive(source_path, destination_path):
+    """Copy a file to an exact candidate without overwriting it.
+
+    The temporary file is created with an unpredictable name in the target
+    directory. On Windows os.rename is an atomic no-overwrite commit; callers
+    treat FileExistsError as a race and choose another candidate.
+    """
+    parent_dir = os.path.dirname(destination_path) or '.'
+    base_name = os.path.basename(destination_path)
+    fd, temporary = tempfile.mkstemp(
+        prefix='.' + base_name + '.', suffix='.tmp', dir=parent_dir
+    )
+    os.close(fd)
+    try:
+        shutil.copy2(source_path, temporary)
+        try:
+            os.rename(temporary, destination_path)
+        except OSError as error:
+            if isinstance(error, FileExistsError) or getattr(error, 'winerror', None) in (80, 183):
+                raise FileExistsError(destination_path)
+            raise
+        return destination_path
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
+
+
+def _dedupe_zip_source_paths(paths):
+    """Normalize selected paths and drop descendants of selected ancestors."""
+    candidates = []
+    seen = set()
+    for path in paths:
+        normalized = _normalize_persisted_path(path)
+        key = _path_identity(normalized)
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        candidates.append(normalized)
+    candidates.sort(key=lambda item: len(os.path.normpath(item)))
+    result = []
+    for candidate in candidates:
+        candidate_key = _path_identity(candidate)
+        covered = False
+        for parent in result:
+            try:
+                parent_key = _path_identity(parent)
+                if os.path.commonpath([candidate_key, parent_key]) == parent_key:
+                    covered = True
+                    break
+            except ValueError:
+                continue
+        if not covered:
+            result.append(candidate)
     return result
 
 
@@ -626,8 +710,12 @@ def _normalize_folder_structure(value):
 # 各类文件预览的截断阈值（产品行为参数，集中可调）
 PREVIEW_PDF_PAGES = 3
 PREVIEW_EXCEL_MAX_ROWS = 10
+PREVIEW_EXCEL_MAX_COLUMNS = 64
+PREVIEW_EXCEL_MAX_SHEETS = 20
 PREVIEW_DOCX_PARAGRAPHS = 20
 PREVIEW_DOC_LINES = 50
+PREVIEW_ARCHIVE_MAX_ENTRIES = 5000
+PREVIEW_ARCHIVE_MAX_OUTPUT_CHARS = 2 * 1024 * 1024
 # 视频预览截取位置(百分比),从左到右排列
 VIDEO_PREVIEW_POSITIONS = [0.1, 0.3, 0.5, 0.7, 0.9]
 
@@ -2046,11 +2134,11 @@ class FolderScanThread(QThread):
 
 
 class FolderStatsThread(QThread):
-    """递归统计某文件夹的文件数与总大小（off UI 线程，避免大目录/网络盘冻结界面）。"""
-    stats_ready = pyqtSignal(int, int, int, bool)  # (token, file_count, total_size, truncated)
-    stats_error = pyqtSignal(int, str)  # (token, message) 顶层遍历异常（如 root 失联）
+    """Recursively count files and total bytes without blocking the UI."""
+    stats_ready = pyqtSignal(int, int, object, bool)  # token, count, Python int bytes, truncated
+    stats_error = pyqtSignal(int, str)
 
-    MAX_FILES = 50000  # 软上限：超过即停，UI 显示 50000+
+    MAX_FILES = 50000
 
     def __init__(self, root, token):
         super().__init__()
@@ -2061,12 +2149,18 @@ class FolderStatsThread(QThread):
         count = 0
         total = 0
         truncated = False
+        traversal_error = None
         if not os.path.isdir(self.root):
             if not self.isInterruptionRequested():
                 self.stats_error.emit(self.token, f'目录不存在或不可访问: {self.root}')
             return
+
+        def on_walk_error(error):
+            nonlocal traversal_error
+            traversal_error = error
+
         try:
-            for dirpath, dirnames, filenames in os.walk(self.root):
+            for dirpath, dirnames, filenames in os.walk(self.root, onerror=on_walk_error):
                 if self.isInterruptionRequested():
                     return
                 for name in filenames:
@@ -2076,44 +2170,52 @@ class FolderStatsThread(QThread):
                     try:
                         total += os.path.getsize(os.path.join(dirpath, name))
                     except OSError:
-                        # 权限/失联/已删除等：跳过单个文件，不中断整体
                         pass
                     if count >= self.MAX_FILES:
                         truncated = True
                         break
                 if truncated:
                     break
-        except Exception as e:
-            # os.walk 顶层异常（root 失联等）：报告错误，避免误显示为"0 个文件"
-            self.stats_error.emit(self.token, str(e))
+        except Exception as error:
+            traversal_error = error
+        if traversal_error is not None:
+            if not self.isInterruptionRequested():
+                self.stats_error.emit(self.token, str(traversal_error))
+            return
         if not self.isInterruptionRequested():
             self.stats_ready.emit(self.token, count, total, truncated)
 
 
 class FileSearchThread(QThread):
-    """在某个文件夹下递归搜索文件：按文件名 + 扩展名 + 修改时间过滤（off UI 线程）。"""
-    search_ready = pyqtSignal(int, list, bool)  # (token, results, truncated)
-    search_error = pyqtSignal(int, str)  # (token, message) 顶层遍历异常
+    """Search files recursively with name, extension and mtime filters."""
+    search_ready = pyqtSignal(int, list, bool)
+    search_error = pyqtSignal(int, str)
 
-    MAX_RESULTS = 2000  # 软上限：超过即停，UI 提示
+    MAX_RESULTS = 2000
 
     def __init__(self, root, token, name_filter, exts, mtime_after):
         super().__init__()
         self.root = root
         self.token = token
         self.name_filter = (name_filter or '').lower()
-        self.exts = exts            # None 或一组扩展名小写（含点）
-        self.mtime_after = mtime_after  # None 或时间戳下限（含）
+        self.exts = exts
+        self.mtime_after = mtime_after
 
     def run(self):
         results = []
         truncated = False
+        traversal_error = None
         if not os.path.isdir(self.root):
             if not self.isInterruptionRequested():
                 self.search_error.emit(self.token, f'目录不存在或不可访问: {self.root}')
             return
+
+        def on_walk_error(error):
+            nonlocal traversal_error
+            traversal_error = error
+
         try:
-            for dirpath, dirnames, filenames in os.walk(self.root):
+            for dirpath, dirnames, filenames in os.walk(self.root, onerror=on_walk_error):
                 if self.isInterruptionRequested():
                     return
                 for name in filenames:
@@ -2129,7 +2231,7 @@ class FileSearchThread(QThread):
                         st_mtime = os.path.getmtime(full)
                         size = os.path.getsize(full)
                     except OSError:
-                        continue  # 权限/失联/已删除：跳过
+                        continue
                     if self.mtime_after is not None and st_mtime < self.mtime_after:
                         continue
                     rel = os.path.relpath(full, self.root)
@@ -2139,9 +2241,12 @@ class FileSearchThread(QThread):
                         break
                 if truncated:
                     break
-        except Exception as e:
-            # os.walk 顶层异常（root 失联等）：报告错误，避免误显示为"未找到匹配文件"
-            self.search_error.emit(self.token, str(e))
+        except Exception as error:
+            traversal_error = error
+        if traversal_error is not None:
+            if not self.isInterruptionRequested():
+                self.search_error.emit(self.token, str(traversal_error))
+            return
         if not self.isInterruptionRequested():
             self.search_ready.emit(self.token, results, truncated)
 
@@ -3176,6 +3281,7 @@ class MainWindow(QMainWindow):
 
         # 加载配置/注释期间累积的警告，待 UI 就绪后统一弹出（此时主窗口尚未构建，不能直接弹框）
         self._pending_load_warnings = []
+        self._comments_load_failed = False
 
         self.current_folder = None
         self.filtered_folders = {'主板': [], '子卡': []}
@@ -3669,40 +3775,38 @@ class MainWindow(QMainWindow):
             pass
 
     def safe_write_json(self, file_path, data, make_hidden=True):
-        """原子地写入JSON文件：先写临时文件再 os.replace 替换，避免写入中途崩溃丢失原文件"""
-        tmp_path = file_path + '.tmp'
+        """Atomically replace JSON without a predictable shared temp name."""
+        directory = os.path.dirname(file_path) or '.'
+        base_name = os.path.basename(file_path)
+        tmp_path = ''
         try:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            # 目标已存在时先解除隐藏/只读，否则 os.replace 在 Windows 上可能失败
+            os.makedirs(directory, exist_ok=True)
             if os.path.exists(file_path):
                 try:
                     os.chmod(file_path, 0o666)
                     if sys.platform == 'win32':
-                        ctypes.windll.kernel32.SetFileAttributesW(file_path, 0x80)  # FILE_ATTRIBUTE_NORMAL
+                        ctypes.windll.kernel32.SetFileAttributesW(file_path, 0x80)
                 except Exception:
                     pass
-            # 上次崩溃残留的 .tmp 可能带只读/隐藏属性：先解除再写入，避免保存通道永久卡死
-            if os.path.exists(tmp_path):
-                try:
-                    os.chmod(tmp_path, 0o666)
-                    if sys.platform == 'win32':
-                        ctypes.windll.kernel32.SetFileAttributesW(tmp_path, 0x80)
-                except Exception:
-                    pass
+            fd, tmp_path = tempfile.mkstemp(
+                prefix='.' + base_name + '.', suffix='.tmp', dir=directory
+            )
+            os.close(fd)
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, file_path)  # 原子替换
+            os.replace(tmp_path, file_path)
+            tmp_path = ''
         except Exception:
-            # 清理残留临时文件，避免污染目录
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
             return False
-        # 数据已原子落盘：属性设置（隐藏/权限）失败不影响保存结果，避免误报保存失败
+        finally:
+            if tmp_path:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
         try:
             os.chmod(file_path, 0o644)
             if make_hidden:
@@ -3787,30 +3891,38 @@ class MainWindow(QMainWindow):
             return None
 
     def load_comments(self):
-        """加载项目注释"""
+        """Load project comments, preserving an unreadable source file."""
         if not os.path.exists(self.COMMENTS_FILE):
+            self._comments_load_failed = False
             return {}
         try:
             with open(self.COMMENTS_FILE, 'r', encoding='utf-8') as f:
-                return _normalize_comments_map(json.load(f))
+                loaded = _normalize_comments_map(json.load(f))
+            self._comments_load_failed = False
+            return loaded
         except (json.JSONDecodeError, ValueError):
-            # 文件损坏：备份而非静默返回 {}（否则下次保存会用空字典永久覆盖所有注释）
             bak = self._backup_corrupt_file(self.COMMENTS_FILE)
             self._pending_load_warnings.append(
                 '注释文件已损坏，已忽略' + (f'并备份为 {os.path.basename(bak)}' if bak else ''))
+            self._comments_load_failed = False
             return {}
         except Exception:
+            self._comments_load_failed = True
+            self._pending_load_warnings.append('注释文件读取失败，已保留原文件')
             return {}
 
     def save_comments(self):
         """保存项目注释"""
+        if getattr(self, '_comments_load_failed', False):
+            QMessageBox.warning(self, '警告', '注释文件读取失败，已阻止自动覆盖原文件。请检查文件权限或占用情况后重启程序。')
+            return False
         self.comments = _normalize_comments_map(self.comments)
         if self.safe_write_json(self.COMMENTS_FILE, self.comments):
             return True
-        else:
-            QMessageBox.warning(self, '警告', '保存注释失败，但不影响程序使用')
-            return False
+        QMessageBox.warning(self, '警告', '保存注释失败，但不影响程序使用')
+        return False
     
+
     def show_settings_dialog(self):
         dialog = SettingsDialog(self.settings, self.include_subfolders, self.sort_by_number, self, getattr(self, 'show_hidden', False), getattr(self, 'regex_state', 'default'), getattr(self, 'custom_mb_regex', ''), getattr(self, 'custom_db_regex', ''))
         if dialog.exec_():
@@ -4140,21 +4252,42 @@ class MainWindow(QMainWindow):
             counter += 1
         return zip_path, zip_name
 
-    def _write_path_to_zip(self, zf, source_path, base_dir):
+    def _write_path_to_zip(self, zf, source_path, base_dir, excluded_paths=None, seen_arcnames=None):
+        """Write one selected path, excluding the output archive and duplicates."""
+        excluded_keys = excluded_paths if excluded_paths is not None else set()
+        if seen_arcnames is None:
+            seen_arcnames = set()
+        source_key = _path_identity(source_path)
+        if source_key in excluded_keys:
+            return
         if os.path.isfile(source_path):
-            zf.write(source_path, os.path.relpath(source_path, base_dir))
+            arcname = os.path.relpath(source_path, base_dir).replace('\\', '/')
+            if arcname in seen_arcnames:
+                return
+            seen_arcnames.add(arcname)
+            zf.write(source_path, arcname)
             return
 
         folder_arcname = os.path.relpath(source_path, base_dir).replace('\\', '/') + '/'
-        zf.writestr(folder_arcname, '')
+        if folder_arcname not in seen_arcnames:
+            seen_arcnames.add(folder_arcname)
+            zf.writestr(folder_arcname, '')
         for root, dirs, files in os.walk(source_path):
+            dirs[:] = [name for name in dirs if _path_identity(os.path.join(root, name)) not in excluded_keys]
             for dir_name in dirs:
                 dir_path = os.path.join(root, dir_name)
                 dir_arcname = os.path.relpath(dir_path, base_dir).replace('\\', '/') + '/'
-                zf.writestr(dir_arcname, '')
+                if dir_arcname not in seen_arcnames:
+                    seen_arcnames.add(dir_arcname)
+                    zf.writestr(dir_arcname, '')
             for file_name in files:
                 file_path = os.path.join(root, file_name)
+                if _path_identity(file_path) in excluded_keys:
+                    continue
                 arcname = os.path.relpath(file_path, base_dir).replace('\\', '/')
+                if arcname in seen_arcnames:
+                    continue
+                seen_arcnames.add(arcname)
                 zf.write(file_path, arcname)
 
     def _move_paths_to_recycle(self, file_paths):
@@ -4324,19 +4457,40 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, '错误', f'无法打开回收站: {str(e)}')
     
-    def _safe_stop_thread(self, thread, timeout_ms=5000):
-        """安全停止后台线程：请求中断并等待其结束，结束后 deleteLater。
+    def _defer_thread_cleanup(self, thread):
+        """Keep a running QThread alive until its finished signal fires."""
+        if thread in self._zombie_threads:
+            return
 
-        绝不销毁仍在运行的 QThread（避免 "QThread: Destroyed while thread is still running" 崩溃）：
-        等待超时后挂入 _zombie_threads，待其 finished 信号触发自动清理。
-        返回 True 表示线程已停止（或无需停止），False 表示超时仍在运行。
-        """
+        def _cleanup(t=thread):
+            try:
+                t.deleteLater()
+            except RuntimeError:
+                pass
+            try:
+                self._zombie_threads.remove(t)
+            except ValueError:
+                pass
+
+        try:
+            thread.finished.connect(_cleanup, Qt.DirectConnection)
+        except RuntimeError:
+            return
+        self._zombie_threads.append(thread)
+        try:
+            if not thread.isRunning():
+                _cleanup()
+        except RuntimeError:
+            _cleanup()
+
+    def _safe_stop_thread(self, thread, timeout_ms=5000, wait=True):
+        """Request interruption and optionally wait before deferred cleanup."""
         if thread is None:
             return True
         try:
             running = thread.isRunning()
         except RuntimeError:
-            return True  # C++ 对象已销毁
+            return True
         if not running:
             try:
                 thread.deleteLater()
@@ -4345,33 +4499,16 @@ class MainWindow(QMainWindow):
             return True
         thread.requestInterruption()
         thread.quit()
+        if not wait:
+            self._defer_thread_cleanup(thread)
+            return True
         if thread.wait(timeout_ms):
             try:
                 thread.deleteLater()
             except RuntimeError:
                 pass
             return True
-        # 超时：线程仍在运行，不得销毁。挂入僵尸列表，等 finished 后自动清理。
-        if thread not in self._zombie_threads:
-            def _cleanup(t=thread):
-                try:
-                    t.deleteLater()
-                except RuntimeError:
-                    pass
-                try:
-                    self._zombie_threads.remove(t)
-                except ValueError:
-                    pass
-            try:
-                # DirectConnection 让僵尸列表在 worker 结束时立即移除（即使主线程事件循环
-                # 正被阻塞）；list.remove 受 GIL 保护，deleteLater 是线程安全的延迟销毁。
-                thread.finished.connect(_cleanup, Qt.DirectConnection)
-            except RuntimeError:
-                pass
-            self._zombie_threads.append(thread)
-            if not thread.isRunning():
-                # 竞态：connect 之前线程已结束（finished 已发射），立即清理，避免僵尸累积
-                _cleanup()
+        self._defer_thread_cleanup(thread)
         return False
 
     def _retry_close(self):
@@ -4394,7 +4531,7 @@ class MainWindow(QMainWindow):
                 old.scan_progress.disconnect(self.on_scan_progress)
             except (TypeError, RuntimeError):
                 pass
-            self._safe_stop_thread(old, 3000)
+            self._safe_stop_thread(old, wait=False)
 
         # 清空表格
         self.motherboard_table.setRowCount(0)
@@ -5016,7 +5153,7 @@ class MainWindow(QMainWindow):
                 old.search_error.disconnect(self._on_search_error)
             except (TypeError, RuntimeError):
                 pass
-            self._safe_stop_thread(old, 2000)
+            self._safe_stop_thread(old, wait=False)
             self._search_thread = None
         name = self.search_name_edit.text()
         exts = self._search_exts_for_combo()
@@ -5117,7 +5254,7 @@ class MainWindow(QMainWindow):
                 t.search_error.disconnect(self._on_search_error)
             except (TypeError, RuntimeError):
                 pass
-            self._safe_stop_thread(t, 2000)
+            self._safe_stop_thread(t, wait=False)
             self._search_thread = None
         self.search_results_list.clear()
         self.search_status_label.setText('')
@@ -5388,7 +5525,6 @@ class MainWindow(QMainWindow):
 
     def _paste_single(self, source_path, target_dir):
         """复制单个文件/文件夹到目标目录，处理重名"""
-        # 防止把文件夹复制进它自身或其子目录，否则 copytree 会无限递归嵌套直到路径超长
         if os.path.isdir(source_path):
             src_norm = os.path.normcase(os.path.normpath(os.path.abspath(source_path)))
             tgt_norm = os.path.normcase(os.path.normpath(os.path.abspath(target_dir)))
@@ -5397,44 +5533,36 @@ class MainWindow(QMainWindow):
 
         base_name = os.path.basename(source_path)
         dest = os.path.join(target_dir, base_name)
-
-        # 处理重名：如果目标已存在，则生成副本名称
-        if os.path.exists(dest):
-            name, ext = os.path.splitext(base_name)
-            # 检查原文件名是否已以 "_副本数字" 结尾
-            match = re.search(r'_副本(\d+)$', name)
-            if match:
-                # 原文件已经是副本，从该数字继续递增
-                base_name_without_copy = name[:match.start()]
-                counter = int(match.group(1)) + 1
-            else:
-                # 原文件不是副本，从1开始
-                base_name_without_copy = name
-                counter = 1
-            while os.path.exists(dest):
-                new_name = f"{base_name_without_copy}_副本{counter}{ext}"
-                dest = os.path.join(target_dir, new_name)
-                counter += 1
-                if counter > 100000:  # 安全上限,避免极端情况无限循环
-                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 '副本' 文件")
+        name, ext = os.path.splitext(base_name)
+        match = re.search(r'_副本(\d+)$', name)
+        if match:
+            base_name_without_copy = name[:match.start()]
+            counter = int(match.group(1)) + 1
+        else:
+            base_name_without_copy = name
+            counter = 1
+        while os.path.exists(dest):
+            new_name = f'{base_name_without_copy}_副本{counter}{ext}'
+            dest = os.path.join(target_dir, new_name)
+            counter += 1
+            if counter > 100000:
+                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件")
 
         if os.path.isdir(source_path):
             shutil.copytree(source_path, dest)
-        else:
-            # 复制到同目录临时文件后改名：os.rename 在 Windows 上目标已存在时抛异常，
-            # 杜绝「检查后、复制前外部进程创建同名文件」被 copy2 静默覆盖的竞态窗口
-            tmp_dest = dest + '.paste-tmp'
+            return
+
+        while True:
             try:
-                shutil.copy2(source_path, tmp_dest)
-                os.rename(tmp_dest, dest)
-            except OSError:
-                try:
-                    if os.path.exists(tmp_dest):
-                        os.remove(tmp_dest)
-                except OSError:
-                    pass
-                raise
-    
+                _copy_file_exclusive(source_path, dest)
+                return
+            except FileExistsError:
+                dest = os.path.join(target_dir, f'{base_name_without_copy}_副本{counter}{ext}')
+                counter += 1
+                if counter > 100000:
+                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件")
+
+
     def save_file_version(self, file_path):
         """保存文件版本：生成 文件名_YYYYMMDD[后缀].ext 的副本。
 
@@ -5479,14 +5607,18 @@ class MainWindow(QMainWindow):
                     break
                 candidate = f'{base_name}_{today}{suffix}{ext}'
                 candidate_path = os.path.join(dir_name, candidate)
-                if not os.path.exists(candidate_path):
-                    new_path = candidate_path
-                    new_name = candidate
-                    break
+                if os.path.exists(candidate_path):
+                    continue
+                try:
+                    _copy_file_exclusive(file_path, candidate_path)
+                except FileExistsError:
+                    continue
+                new_path = candidate_path
+                new_name = candidate
+                break
             if new_path is None:
                 QMessageBox.warning(self, '错误', f'保存版本失败: 当天版本数量已达上限（{MAX_VERSION_RANKS + 1} 个）')
                 return
-            shutil.copy2(file_path, new_path)
             self.statusBar().showMessage(f'已保存版本: {new_name}')
         except Exception as e:
             QMessageBox.warning(self, '错误', f'保存版本失败: {str(e)}')
@@ -5511,7 +5643,7 @@ class MainWindow(QMainWindow):
             
             self._reset_preview()
             os.rename(file_path, new_path)
-            self.statusBar().showMessage(f"已重命名: {old_name} -> {new_name}")
+            self.statusBar().showMessage(f'已保存版本: {new_name}')
 
             settings_changed = False
             old_comment = _get_path_mapping_value(self.comments, file_path)
@@ -5547,40 +5679,40 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "错误", f"重命名失败: {str(e)}")
     
     def add_to_zip(self, source_path):
-        """将文件或文件夹添加到zip压缩包"""
+        """Create a ZIP archive, refusing to overwrite an existing file."""
         try:
             import zipfile
 
             parent_dir = os.path.dirname(source_path)
             base_name = os.path.basename(source_path)
-            zip_path, zip_name = self._create_unique_zip_path(parent_dir, base_name)
-
-            try:
-                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    self._write_path_to_zip(zf, source_path, parent_dir)
-            except Exception:
-                # 写入失败：清理残留的不完整压缩包，避免垃圾文件
+            while True:
+                zip_path, zip_name = self._create_unique_zip_path(parent_dir, base_name)
                 try:
-                    if os.path.exists(zip_path):
-                        os.remove(zip_path)
-                except OSError:
-                    pass
-                raise
-
+                    with zipfile.ZipFile(zip_path, 'x', zipfile.ZIP_DEFLATED) as zf:
+                        self._write_path_to_zip(
+                            zf,
+                            source_path,
+                            parent_dir,
+                            excluded_paths={_path_identity(zip_path)},
+                            seen_arcnames=set(),
+                        )
+                    break
+                except FileExistsError:
+                    continue
+                except Exception:
+                    try:
+                        if os.path.exists(zip_path):
+                            os.remove(zip_path)
+                    except OSError:
+                        pass
+                    raise
             self.statusBar().showMessage(f"已创建压缩包: {zip_name}")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建压缩包失败: {str(e)}")
 
     def add_paths_to_zip(self, source_paths):
-        """将多个文件或文件夹添加到同一个zip压缩包"""
-        valid_paths = []
-        seen = set()
-        for source_path in source_paths:
-            normalized_path = os.path.normpath(source_path)
-            if os.path.exists(source_path) and normalized_path not in seen:
-                seen.add(normalized_path)
-                valid_paths.append(source_path)
-
+        """Create one ZIP archive for multiple paths without duplicates."""
+        valid_paths = [path for path in _dedupe_zip_source_paths(source_paths) if os.path.exists(path)]
         if not valid_paths:
             QMessageBox.warning(self, "警告", "没有可压缩的文件或文件夹")
             return
@@ -5597,24 +5729,34 @@ class MainWindow(QMainWindow):
                 base_dir = common_path if os.path.isdir(common_path) else os.path.dirname(common_path)
                 target_dir = base_dir
 
-            zip_path, zip_name = self._create_unique_zip_path(target_dir, '选中文件')
-
-            try:
-                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for source_path in valid_paths:
-                        self._write_path_to_zip(zf, source_path, base_dir)
-            except Exception:
-                # 写入失败：清理残留的不完整压缩包，避免垃圾文件
+            while True:
+                zip_path, zip_name = self._create_unique_zip_path(target_dir, "选中文件")
                 try:
-                    if os.path.exists(zip_path):
-                        os.remove(zip_path)
-                except OSError:
-                    pass
-                raise
-
+                    with zipfile.ZipFile(zip_path, 'x', zipfile.ZIP_DEFLATED) as zf:
+                        seen_arcnames = set()
+                        excluded_paths = {_path_identity(zip_path)}
+                        for source_path in valid_paths:
+                            self._write_path_to_zip(
+                                zf,
+                                source_path,
+                                base_dir,
+                                excluded_paths=excluded_paths,
+                                seen_arcnames=seen_arcnames,
+                            )
+                    break
+                except FileExistsError:
+                    continue
+                except Exception:
+                    try:
+                        if os.path.exists(zip_path):
+                            os.remove(zip_path)
+                    except OSError:
+                        pass
+                    raise
             self.statusBar().showMessage(f"已创建压缩包: {zip_name}")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建压缩包失败: {str(e)}")
+
 
     @staticmethod
     def _resource_path(relative_path):
@@ -5766,7 +5908,7 @@ class MainWindow(QMainWindow):
                 old.stats_error.disconnect(self._on_stats_error)
             except (TypeError, RuntimeError):
                 pass
-            self._safe_stop_thread(old, 2000)
+            self._safe_stop_thread(old, wait=False)
             self._stats_thread = None
         root = getattr(self, 'current_folder', None)
         if not root or not os.path.isdir(root):
@@ -6140,7 +6282,7 @@ class MainWindow(QMainWindow):
             self.preview_tab.setPlainText('正在生成视频缩略图...')
             old = getattr(self, '_video_thumb_thread', None)
             if old is not None and old.isRunning():
-                self._safe_stop_thread(old, 1500)
+                self._safe_stop_thread(old, wait=False)
             thread = VideoFrameThread(file_path, 96, self)
             self._video_thumb_thread = thread
             thread.frames_ready.connect(self._on_video_frames_ready)
@@ -6235,25 +6377,38 @@ class MainWindow(QMainWindow):
             archive_info = f'压缩包: {os.path.basename(file_path)}\n\n'
             files_list = []
             total_size = 0
+            truncated = False
             if ext == '.zip':
                 import zipfile
                 with zipfile.ZipFile(file_path, 'r') as zf:
                     for item in zf.infolist():
+                        if len(files_list) >= PREVIEW_ARCHIVE_MAX_ENTRIES:
+                            truncated = True
+                            break
                         filename = _decode_zip_name(item.filename)
                         files_list.append((filename, item.file_size, item.is_dir()))
                         total_size += item.file_size
             elif ext in ['.rar', '.7z']:
                 items = self._list_archive_with_7z(file_path)
                 for filename, size, is_dir in items:
+                    if len(files_list) >= PREVIEW_ARCHIVE_MAX_ENTRIES:
+                        truncated = True
+                        break
                     files_list.append((filename, size, is_dir))
                     total_size += size
-            
+
             file_tree = self._build_file_tree(files_list)
             archive_info += f'文件总数: {len(files_list)}\n'
             archive_info += f'总大小: {total_size / 1024:.2f} KB\n\n'
+            if truncated:
+                archive_info += '文件过多，仅显示前 ' + str(PREVIEW_ARCHIVE_MAX_ENTRIES) + ' 项，后续内容未列出。\n\n'
             archive_info += '文件树结构:\n'
             archive_info += '=' * 60 + '\n'
-            archive_info += self._print_tree(file_tree)
+            tree_text = self._print_tree(file_tree)
+            if len(tree_text) > PREVIEW_ARCHIVE_MAX_OUTPUT_CHARS:
+                tree_text = tree_text[:PREVIEW_ARCHIVE_MAX_OUTPUT_CHARS]
+                tree_text += '\n' + '文件树过大，已截断显示。'
+            archive_info += tree_text
             self.preview_tab.setPlainText(archive_info)
         except Exception as e:
             self.preview_tab.setPlainText(f'压缩包预览错误: {str(e)}')
@@ -6270,11 +6425,11 @@ class MainWindow(QMainWindow):
             workbook = None
             try:
                 workbook = load_workbook(file_path, read_only=True, keep_vba=is_macro)
-                for sheet_name in workbook.sheetnames:
+                for sheet_name in workbook.sheetnames[:PREVIEW_EXCEL_MAX_SHEETS]:
                     content += f'工作表: {sheet_name}\n'
                     worksheet = workbook[sheet_name]
                     for row in worksheet.iter_rows(min_row=1, max_row=PREVIEW_EXCEL_MAX_ROWS, values_only=True):
-                        content += '\t'.join(str(cell) if cell is not None else '' for cell in row) + '\n'
+                        content += '\t'.join(str(cell) if cell is not None else '' for cell in row[:PREVIEW_EXCEL_MAX_COLUMNS]) + '\n'
                     content += '\n'
             except Exception as e:
                 content += (f'Excel宏文件读取错误: {str(e)}' if is_macro else f'Excel读取错误: {str(e)}')
@@ -6293,12 +6448,12 @@ class MainWindow(QMainWindow):
             workbook = None
             try:
                 workbook = xlrd.open_workbook(file_path)
-                for sheet_idx in range(workbook.nsheets):
+                for sheet_idx in range(min(workbook.nsheets, PREVIEW_EXCEL_MAX_SHEETS)):
                     sheet = workbook.sheet_by_index(sheet_idx)
                     content += f'工作表: {sheet.name}\n'
                     max_rows = min(sheet.nrows, PREVIEW_EXCEL_MAX_ROWS)
                     for row_idx in range(max_rows):
-                        row_data = [str(sheet.cell(row_idx, col_idx).value) for col_idx in range(sheet.ncols)]
+                        row_data = [str(sheet.cell(row_idx, col_idx).value) for col_idx in range(min(sheet.ncols, PREVIEW_EXCEL_MAX_COLUMNS))]
                         content += '\t'.join(row_data) + '\n'
                     content += '\n'
             except Exception as e:
@@ -7482,7 +7637,7 @@ def _unique_backup_path(target):
 
 
 def _replace_executable(target, source, retries=5):
-    """把 source 替换到 target；优先 ReplaceFileW，失败退回备份+替换。"""
+    """Replace target with source while preserving a recoverable backup."""
     target = os.path.abspath(target)
     source = os.path.abspath(source)
     if not os.path.isfile(target):
@@ -7492,14 +7647,21 @@ def _replace_executable(target, source, retries=5):
     if os.path.normcase(target) == os.path.normcase(source):
         return False, '目标文件与更新文件相同'
     target_dir = os.path.dirname(target)
-    new_path = os.path.join(target_dir, '.SeavoExplorer-update-new.exe')
-    backup_path = _unique_backup_path(target)
     last_error = ''
+    last_new_path = ''
     for _attempt in range(max(1, retries)):
+        backup_path = ''
+        fd, new_path = tempfile.mkstemp(prefix='.SeavoExplorer-update-', suffix='.exe', dir=target_dir)
+        os.close(fd)
+        last_new_path = new_path
         try:
             shutil.copy2(source, new_path)
         except OSError as error:
             last_error = '复制更新文件失败：%s' % error
+            try:
+                os.remove(new_path)
+            except OSError:
+                pass
             time.sleep(0.5)
             continue
         if sys.platform == 'win32':
@@ -7510,25 +7672,44 @@ def _replace_executable(target, source, retries=5):
                 wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID,
             ]
             kernel32.ReplaceFileW.restype = wintypes.BOOL
+            backup_path = _unique_backup_path(target)
             if kernel32.ReplaceFileW(target, new_path, backup_path, 0x1, None, None):
                 return True, ''
             last_error = 'ReplaceFileW 失败（错误码 %s）' % kernel32.GetLastError()
+            if os.path.exists(backup_path) and os.path.exists(target):
+                backup_path = _unique_backup_path(target)
+        if not backup_path:
+            backup_path = _unique_backup_path(target)
         try:
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
             os.replace(target, backup_path)
-            try:
-                os.replace(new_path, target)
-            except Exception:
-                os.replace(backup_path, target)
-                raise
-            return True, ''
         except OSError as error:
-            last_error = str(error)
+            last_error = '备份失败: %s' % error
+            try:
+                os.remove(new_path)
+            except OSError:
+                pass
             time.sleep(0.5)
+            continue
+        try:
+            os.replace(new_path, target)
+        except OSError as install_error:
+            try:
+                os.replace(backup_path, target)
+            except OSError as rollback_error:
+                return False, ('替换失败，且回滚失败； %s; 旧程序保留在： %s; 新程序保留在： %s') % (
+                    install_error, backup_path, new_path,
+                )
+            last_error = str(install_error)
+            try:
+                os.remove(new_path)
+            except OSError:
+                pass
+            time.sleep(0.5)
+            continue
+        return True, ''
     try:
-        if os.path.exists(new_path):
-            os.remove(new_path)
+        if last_new_path and os.path.exists(last_new_path):
+            os.remove(last_new_path)
     except OSError:
         pass
     return False, last_error or '替换失败'

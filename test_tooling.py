@@ -632,6 +632,26 @@ class CodeSigningTests(unittest.TestCase):
             self.assertTrue(result['signed'])
             self.assertTrue(result['verified'])
 
+    def test_public_signing_manifest_excludes_secrets(self):
+        public = build_support.public_signing_manifest({
+            'mode': 'pfx',
+            'signed': True,
+            'verified': False,
+            'trusted': False,
+            'self_signed': True,
+            'subject': 'CN=Test',
+            'thumbprint': 'ABC',
+            'status': 'UnknownError',
+            'timestamp_subject': '',
+            'pfx': r'C:\\secrets\\cert.pfx',
+            'pfx_password': 'super-secret',
+        })
+        self.assertNotIn('pfx', public)
+        self.assertNotIn('pfx_password', public)
+        self.assertNotIn('super-secret', repr(public))
+        self.assertEqual(public['mode'], 'pfx')
+        self.assertTrue(public['signed'])
+
     def test_validate_code_signing_policy(self):
         build_support.validate_code_signing(
             {'mode': 'none', 'signed': False}, require_signed=False, allow_untrusted=False)

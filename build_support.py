@@ -303,6 +303,29 @@ def sign_distribution_entrypoint(entrypoint):
     return sign_executable(entrypoint, config)
 
 
+def public_signing_manifest(config):
+    """Return only public signing metadata for the build manifest.
+
+    PFX paths and passwords are for signtool only and must never be
+    serialized into a manifest or uploaded release asset.
+    """
+    source = config if isinstance(config, dict) else {}
+    mode = source.get('mode', 'none')
+    if mode not in ('none', 'store', 'pfx'):
+        raise BuildError('签名模式非法：{}'.format(mode))
+    return {
+        'mode': mode,
+        'signed': source.get('signed') is True,
+        'verified': source.get('verified') is True,
+        'trusted': source.get('trusted') is True,
+        'self_signed': source.get('self_signed') is True,
+        'subject': str(source.get('subject') or ''),
+        'thumbprint': str(source.get('thumbprint') or ''),
+        'status': str(source.get('status') or ('NotSigned' if mode == 'none' else '')),
+        'timestamp_subject': str(source.get('timestamp_subject') or ''),
+    }
+
+
 def validate_code_signing(code_signing, require_signed=None, allow_untrusted=None):
     """校验 manifest.code_signing 是否符合发布策略。"""
     if not isinstance(code_signing, dict):
@@ -1254,17 +1277,7 @@ def write_build_outputs(
         'inputs_sha256': _input_hashes(),
         'checks': checks,
         'binary_source_audit': audit,
-        'code_signing': code_signing or {
-            'mode': 'none',
-            'signed': False,
-            'verified': False,
-            'trusted': False,
-            'self_signed': False,
-            'subject': '',
-            'thumbprint': '',
-            'status': 'NotSigned',
-            'timestamp_subject': '',
-        },
+        'code_signing': public_signing_manifest(code_signing),
         'artifact': artifact,
     }
     _write_json_atomic(manifest_path, manifest)
