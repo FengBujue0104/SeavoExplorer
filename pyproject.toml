@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SeavoExplorer"
-version = "0.6.3"
+version = "0.6.4"
 description = "主板项目文件浏览器 — 用于浏览以 S/M 编号命名的硬件/PCB 项目文件夹"
 readme = "README.md"
 license = { text = "MIT" }

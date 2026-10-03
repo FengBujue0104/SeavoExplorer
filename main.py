@@ -438,7 +438,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.3'
+APP_VERSION = '0.6.4'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -7088,8 +7088,8 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>0.6.3 重点加固无覆盖写入、ZIP 去重、更新失败回滚与正则风险检测；'
-            '同时完善大目录统计、线程清理、预览上限和配置文件保护。</p>'
+            '<p>0.6.4 同步完善程序内外的安全、更新与文件操作说明；'
+            '并保留 0.6.3 的无覆盖写入、ZIP 去重、更新回滚、正则风险检测和稳定性加固。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
         )
