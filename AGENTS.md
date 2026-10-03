@@ -76,7 +76,7 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 
 扫描器要求捕获组 1 可转换为整数项目编号，并直接读取捕获组 2 作为注释。自定义规则修改必须覆盖该契约、编译失败回退、持久化和异步扫描快照。
 
-重要现状：`_is_regex_safe()` 已接入保存与解析链路，并在 0.6.0 升级为结构分析器，覆盖 `{m,n}` 量词、嵌套重复组和回溯引用；它仍是启发式防护，不能保证覆盖所有复杂正则，不要在文档、发布说明或回复中声称对任意自定义规则实现了完整 ReDoS 防护。
+重要现状：`_is_regex_safe()` 已接入保存与解析链路，并在 0.6.0 升级为结构分析器，覆盖 `{m,n}` 量词、嵌套重复组、回溯引用，并在 0.6.3 增加相邻大范围/无上限重复量词检测；它仍是启发式防护，不能保证覆盖所有复杂正则，不要在文档、发布说明或回复中声称对任意自定义规则实现了完整 ReDoS 防护。
 
 ### 状态持久化
 
@@ -84,29 +84,32 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 
 - `seavoexplorer.json`：项目根、排序、快捷访问、7-Zip、预览、正则、窗口状态和模板等。
 - `seavo_comments.json`：以绝对项目路径为键的用户注释。
-- `safe_write_json()` 使用同目录临时文件、flush/fsync、`os.replace` 原子替换，并恢复 Windows 隐藏属性。
+- `safe_write_json()` 使用随机独占临时文件、flush/fsync、`os.replace` 原子替换，并恢复 Windows 隐藏属性。
+- 注释文件读取失败时必须阻止自动保存覆盖原文件。
 
 新增/改名设置项至少同步默认值、加载、保存、对话框、运行时消费者、旧配置兼容和帮助文本。
 
 ### 代码签名与更新
 
-- `SEAVO_SIGN_MODE=store|pfx` 启用 Authenticode 签名；manifest 的 `code_signing` 记录主体、指纹、验证状态和时间戳。
+- `SEAVO_SIGN_MODE=store|pfx` 启用 Authenticode 签名；manifest 的 `code_signing` 只能通过公开字段白名单记录主体、指纹、验证状态和时间戳，PFX 路径/密码等执行凭据绝不能进入 manifest。
 - `SEAVO_REQUIRE_SIGNING=1` 让 `release.py` 拒绝未签名 manifest；自签名开发构建需同时设置 `SEAVO_SIGN_ALLOW_UNTRUSTED=1`。
-- 打包后的 EXE 支持 `--apply-update --target ... --pid ... --sha256 ...`：等待旧进程退出后用 `ReplaceFileW` 替换并保留 `.old` 备份；源码模式必须拒绝更新模式。
+- 打包后的 EXE 支持 `--apply-update --target ... --pid ... --sha256 ...`：等待旧进程退出后用唯一临时文件和 `ReplaceFileW` 替换并保留 `.old` 备份；源码模式必须拒绝更新模式。
+- 若安装失败且回滚失败，必须停止重试并同时保留 `.old` 备份与下载的新 EXE。
 - 自签名不会消除其他电脑的 SmartScreen 提示，正式发布应换用公共可信证书。
 
 ### 线程与 UI
 
-磁盘扫描、统计、搜索、下载和媒体处理不能移回 UI 线程。后台线程通过信号更新控件；替换任务时保留 token/取消/`requestInterruption()`，窗口关闭前正确结束线程。
+磁盘扫描、统计、搜索、下载和媒体处理不能移回 UI 线程。后台线程通过信号更新控件；替换任务时保留 token/取消/`requestInterruption()`，交互路径不得同步等待旧线程，线程结束后再延迟清理；窗口关闭前正确结束线程。
 
 ### 文件操作与安全不变量
 
 - 终端、PowerShell、cmd 必须以结构化参数和 `cwd` 在用户选中路径启动；不能把路径拼入命令文本或默认提权。
 - 删除只允许 Win10/11 现代回收站后端；失败必须保留源文件，绝不降级永久删除。
-- 复制、保存版本、压缩、解压和 `old/` 归档禁止静默覆盖。
+- 复制、保存版本、压缩、解压和 `old/` 归档禁止静默覆盖。文件复制采用独占临时文件和无覆盖提交；多选 ZIP 必须剔除父子重复路径、排除输出 ZIP 自身并按成员名去重。
 - ZIP/7Z 智能解压必须保留预检、同盘 staging、完整校验、取消处理和无覆盖提交。
 - 7-Zip 配置只能接受名为 `7z.exe` 的现有文件；RAR/7Z 默认不授权，ZIP 不受该开关影响。
 - 关闭某类自动预览后，当前文件仍应显示「显示预览」按钮；点击按钮只对当前目标执行一次手动预览。
+- 压缩包/Excel 等预览必须保留数量与输出上限，避免大文件或大表格长时间占用 UI。
 - `.opj`、`.dsn`、`.sch`、`.brd`、`.dbk`、`.dsnlck` 有意只显示不可预览提示。
 
 ## 修改规则
@@ -174,6 +177,6 @@ git status --short
 - 已发布 v0.6.2 EXE 为 96,963,888 bytes，SHA-256：`6B730DD639F2BBAA1149C76975A8E4E0E56BD62C4EA2A02F339413A426842234`；该版本仅修改版本号，用于验证 0.6.1 → 0.6.2 更新流程。
 
 - annotated tag `v0.6.3`（tag object `f9ff8f29377ead287887d916cfb4eeeed77e839d`）指向 `14597501b6dde6065308b169dbaaf1bff34a73bc`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.3
-- 已发布 v0.6.3 EXE 为 96,579,280 bytes，SHA-256：`6D0F09CC5B0B9E9EAA3B7F082C668FBA7C6BAA36C7CFA0669868F23E2C3A2C5E`；使用自签名证书，远端三资产 digest 已核对。
+- 已发布 v0.6.3 EXE 为 96,579,280 bytes，SHA-256：`6D0F09CC5B0B9E9EAA3B7F082C668FBA7C6BAA36C7CFA0669868F23E2C3A2C5E`；使用自签名证书，远端三资产 digest 已核对。 本版加固无覆盖提交、ZIP 去重、更新回滚、相邻重复正则、大目录统计、线程清理、预览上限和签名 manifest 脱敏。
 
 交付时明确报告修改文件、实际执行的检查、构建产物哈希和未执行事项；不要把“语法可解析”表述成“GUI 功能已验证”。
