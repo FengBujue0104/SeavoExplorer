@@ -8,6 +8,8 @@ v0.6.2（2026-09-09）已发布：annotated tag `v0.6.2`（tag object `ec78efbd2
 
 v0.6.3（2026-10-02）已发布：annotated tag `v0.6.3`（tag object `f9ff8f29377ead287887d916cfb4eeeed77e839d`）指向 `14597501b6dde6065308b169dbaaf1bff34a73bc`，EXE 96,579,280 bytes，SHA-256 `6D0F09CC5B0B9E9EAA3B7F082C668FBA7C6BAA36C7CFA0669868F23E2C3A2C5E`；使用自签名证书，远端三资产 digest 已核对。 本版主要包括无覆盖文件提交、ZIP 父子路径去重与输出排除、更新回滚备份保留、相邻重复量词检测、大目录统计整数安全、线程清理、预览上限和 manifest 签名信息脱敏。
 
+v0.6.4（2026-10-03）已发布：annotated tag `v0.6.4`（tag object `c53fa30c93eac940674a316ab966cb2013471cd7`）指向 `b6fbe3e3ed762aeb8b0f724bf72ba26d99fb49cf`，EXE 96,580,120 bytes，SHA-256 `D2698016CECCACD1C793E093CEA9A41F4CAECB427918CFD05573DB1E143DD0AD`；使用自签名证书，远端三资产 digest 已核对。本版同步更新程序内关于/帮助/向导和 README、打包指南描述。
+
 
 ## 1. 已验证基线
 
