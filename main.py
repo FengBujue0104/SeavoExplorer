@@ -18,6 +18,7 @@ import hashlib
 import urllib.error
 import urllib.request
 from collections import namedtuple
+import heapq
 
 # 尝试导入OpenCV用于视频缩略图生成
 try:
@@ -438,7 +439,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.6'
+APP_VERSION = '0.6.7'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -494,8 +495,270 @@ def _is_reparse_point(path):
     return False
 
 
+def _format_byte_size(size):
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        size = 0
+    if size < 1024:
+        return '%s B' % size
+    if size < 1024 * 1024:
+        return '%.2f KB' % (size / 1024.0)
+    if size < 1024 * 1024 * 1024:
+        return '%.2f MB' % (size / (1024.0 * 1024.0))
+    return '%.2f GB' % (size / (1024.0 * 1024.0 * 1024.0))
+
+
+def _relative_path_for_display(root, path):
+    """Return a project-relative path when possible; otherwise the absolute path."""
+    if not path:
+        return ''
+    abs_path = os.path.normpath(os.path.abspath(path))
+    if not root:
+        return abs_path
+    try:
+        abs_root = os.path.normpath(os.path.abspath(root))
+        relative = os.path.relpath(abs_path, abs_root)
+    except (ValueError, TypeError, OSError):
+        return abs_path
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return abs_path
+    return relative
+
+
+def _collect_largest_files(root, top_n=50, max_files=50000, is_canceled=None):
+    """Walk a project tree and keep the largest files.
+
+    Returns None if canceled. Raises FileNotFoundError when root is missing.
+    Walk errors are fail-closed (raised to the caller). Reparse points are skipped.
+    """
+    if is_canceled is None:
+        is_canceled = lambda: False
+    try:
+        top_n = int(top_n)
+    except (TypeError, ValueError):
+        top_n = 50
+    if top_n < 0:
+        top_n = 0
+    try:
+        max_files = int(max_files)
+    except (TypeError, ValueError):
+        max_files = 50000
+    if max_files <= 0:
+        max_files = 1
+    if not os.path.isdir(root):
+        raise FileNotFoundError('目录不存在或不可访问: %s' % root)
+
+    heap = []
+    seq = 0
+    count = 0
+    total = 0
+    truncated = False
+    traversal_error = None
+
+    def on_walk_error(error):
+        nonlocal traversal_error
+        traversal_error = error
+
+    abs_root = os.path.normpath(os.path.abspath(root))
+    if is_canceled():
+        return None
+    try:
+        for dirpath, dirnames, filenames in os.walk(abs_root, onerror=on_walk_error):
+            dirnames[:] = [
+                name for name in dirnames
+                if not _is_reparse_point(os.path.join(dirpath, name))
+            ]
+            if is_canceled():
+                return None
+            for name in filenames:
+                if is_canceled():
+                    return None
+                full = os.path.join(dirpath, name)
+                if _is_reparse_point(full):
+                    continue
+                count += 1
+                try:
+                    size = os.path.getsize(full)
+                    mtime = os.path.getmtime(full)
+                except OSError:
+                    continue
+                total += size
+                seq += 1
+                item = {
+                    'path': full,
+                    'size': size,
+                    'mtime': mtime,
+                    'rel': _relative_path_for_display(abs_root, full),
+                }
+                if top_n > 0:
+                    if len(heap) < top_n:
+                        heapq.heappush(heap, (size, seq, item))
+                    elif size > heap[0][0]:
+                        heapq.heapreplace(heap, (size, seq, item))
+                if count >= max_files:
+                    truncated = True
+                    break
+            if truncated:
+                break
+    except Exception as error:
+        traversal_error = error
+    if is_canceled():
+        return None
+    if traversal_error is not None:
+        raise traversal_error
+    items = [entry[2] for entry in sorted(heap, key=lambda entry: (-entry[0], entry[1]))]
+    return {
+        'items': items,
+        'count': count,
+        'total': total,
+        'truncated': truncated,
+        'root': abs_root,
+        'top_n': top_n,
+    }
+
+
+_SHELL_SELECT_APIS_READY = False
+
+
+def _explorer_executable():
+    system_root = os.environ.get('SystemRoot', r'C:\Windows')
+    return os.path.join(system_root, 'explorer.exe')
+
+
+def _explorer_select_command(path):
+    """Build explorer /select argv. The path is a separate argument."""
+    if not path:
+        raise ValueError('path is required')
+    target = os.path.normpath(os.path.abspath(path))
+    return [_explorer_executable(), '/select,', target]
+
+
+def _prepare_shell_select_apis():
+    global _SHELL_SELECT_APIS_READY
+    if _SHELL_SELECT_APIS_READY:
+        return True
+    if sys.platform != 'win32':
+        return False
+    shell32 = ctypes.windll.shell32
+    shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+    shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
+    shell32.SHOpenFolderAndSelectItems.restype = ctypes.HRESULT
+    shell32.SHOpenFolderAndSelectItems.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+    ]
+    shell32.ILFree.restype = None
+    shell32.ILFree.argtypes = [ctypes.c_void_p]
+    _SHELL_SELECT_APIS_READY = True
+    return True
+
+
+def _sh_open_folder_and_select_item(path):
+    if not _prepare_shell_select_apis():
+        return False
+    shell32 = ctypes.windll.shell32
+    pidl = shell32.ILCreateFromPathW(path)
+    if not pidl:
+        return False
+    try:
+        hr = shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+        return int(hr) >= 0
+    except Exception:
+        return False
+    finally:
+        try:
+            shell32.ILFree(pidl)
+        except Exception:
+            pass
+
+
+def _reveal_path_in_explorer(path):
+    """Open Explorer and select the given file or folder.
+
+    Tries SHOpenFolderAndSelectItems first; falls back to explorer /select
+    with a structured argv. Never uses shell=True or CREATE_NO_WINDOW.
+    """
+    if not path:
+        raise ValueError('路径为空')
+    target = os.path.normpath(os.path.abspath(path))
+    if not os.path.lexists(target):
+        raise FileNotFoundError(target)
+    if sys.platform == 'win32' and _sh_open_folder_and_select_item(target):
+        return target
+    subprocess.Popen(_explorer_select_command(target))
+    return target
+
 def _same_path(left, right):
     return bool(_path_identity(left)) and _path_identity(left) == _path_identity(right)
+
+
+UNDO_STACK_LIMIT = 20
+
+
+def _make_undo_rename(current_path, original_path, label='重命名'):
+    return {
+        'kind': 'rename',
+        'current': current_path,
+        'original': original_path,
+        'label': label,
+    }
+
+
+def _make_undo_create(paths, label='创建的文件'):
+    return {
+        'kind': 'create',
+        'paths': [path for path in paths if path],
+        'label': label,
+    }
+
+
+def _make_undo_move(pairs, label='移动'):
+    cleaned = []
+    for original, current in pairs or []:
+        if original and current:
+            cleaned.append((original, current))
+    return {
+        'kind': 'move',
+        'pairs': cleaned,
+        'label': label,
+    }
+
+
+def _undo_rename_possible(current, original):
+    if not current or not os.path.lexists(current):
+        return False, '撤回目标已不存在'
+    if original and os.path.lexists(original) and not _same_path(current, original):
+        return False, '原路径已被占用，未覆盖'
+    if not original:
+        return False, '缺少原始路径'
+    return True, ''
+
+
+def _apply_undo_rename(current, original):
+    os.rename(current, original)
+    return original
+
+
+def _apply_undo_create_paths(paths, recycle_fn):
+    """Send created files to recycle_fn. Fail closed: leftover files stay on disk."""
+    successes = []
+    errors = []
+    for path in paths or []:
+        if not path:
+            continue
+        if not os.path.lexists(path):
+            errors.append((path, '文件已不存在'))
+            continue
+        try:
+            recycle_fn(path)
+            successes.append(path)
+        except Exception as error:
+            errors.append((path, str(error)))
+    return successes, errors
+
 
 
 def _path_in_list(paths, path):
@@ -2505,6 +2768,210 @@ class FileSearchThread(QThread):
             self.search_ready.emit(self.token, results, truncated)
 
 
+class _ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class FolderLargestFilesThread(QThread):
+    """Collect the largest files in a project without blocking the UI."""
+    result_ready = pyqtSignal(int, object)
+    result_error = pyqtSignal(int, str)
+
+    MAX_FILES = 50000
+    TOP_N = 50
+
+    def __init__(self, root, token, top_n=None, max_files=None):
+        super().__init__()
+        self.root = root
+        self.token = token
+        self.top_n = self.TOP_N if top_n is None else top_n
+        self.max_files = self.MAX_FILES if max_files is None else max_files
+
+    def run(self):
+        if not os.path.isdir(self.root):
+            if not self.isInterruptionRequested():
+                self.result_error.emit(self.token, '目录不存在或不可访问: %s' % self.root)
+            return
+        try:
+            payload = _collect_largest_files(
+                self.root,
+                top_n=self.top_n,
+                max_files=self.max_files,
+                is_canceled=self.isInterruptionRequested,
+            )
+        except Exception as error:
+            if not self.isInterruptionRequested():
+                self.result_error.emit(self.token, str(error))
+            return
+        if payload is None or self.isInterruptionRequested():
+            return
+        self.result_ready.emit(self.token, payload)
+
+
+class LargestFilesDialog(QDialog):
+    def __init__(self, payload, parent=None):
+        super().__init__(parent)
+        self.payload = payload or {}
+        self.root = self.payload.get('root') or ''
+        title_name = os.path.basename(self.root) or '占用分析'
+        self.setWindowTitle('占用分析 — %s' % title_name)
+        self.resize(920, 540)
+
+        layout = QVBoxLayout()
+        summary = QLabel(self._summary_text())
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(['文件名', '大小', '占比', '修改时间', '相对路径'])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.cellDoubleClicked.connect(lambda row, _col: self._reveal_row(row))
+        layout.addWidget(self.table)
+        self._populate()
+
+        buttons = QHBoxLayout()
+        reveal_btn = QPushButton('在资源管理器中显示')
+        reveal_btn.clicked.connect(self._reveal_selected)
+        copy_full_btn = QPushButton('复制完整路径')
+        copy_full_btn.clicked.connect(self._copy_full_path)
+        copy_rel_btn = QPushButton('复制相对路径')
+        copy_rel_btn.clicked.connect(self._copy_relative_path)
+        close_btn = QPushButton('关闭')
+        close_btn.clicked.connect(self.accept)
+        buttons.addWidget(reveal_btn)
+        buttons.addWidget(copy_full_btn)
+        buttons.addWidget(copy_rel_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+        self.setLayout(layout)
+
+    def _summary_text(self):
+        count = int(self.payload.get('count') or 0)
+        total = int(self.payload.get('total') or 0)
+        items = self.payload.get('items') or []
+        truncated = bool(self.payload.get('truncated'))
+        shown = len(items)
+        if truncated:
+            return (
+                '已扫描 %s+ 个文件 · ≥%s（结果可能不完整）。显示最大 %s 个。'
+                '双击或点“在资源管理器中显示”可定位文件。'
+                % (count, _format_byte_size(total), shown)
+            )
+        return (
+            '共 %s 个文件 · %s。显示最大 %s 个。'
+            '双击或点“在资源管理器中显示”可定位文件。'
+            % (count, _format_byte_size(total), shown)
+        )
+
+    def _populate(self):
+        items = list(self.payload.get('items') or [])
+        total = int(self.payload.get('total') or 0)
+        self.table.setRowCount(len(items))
+        for row, entry in enumerate(items):
+            path = entry.get('path') or ''
+            size = int(entry.get('size') or 0)
+            mtime = entry.get('mtime')
+            rel = entry.get('rel') or _relative_path_for_display(self.root, path)
+            name_item = QTableWidgetItem(os.path.basename(path) or path)
+            name_item.setData(Qt.UserRole, entry)
+            name_item.setToolTip(path)
+            size_item = QTableWidgetItem(_format_byte_size(size))
+            if total > 0:
+                percent_text = '%.1f%%' % (100.0 * size / total)
+            else:
+                percent_text = '—'
+            percent_item = QTableWidgetItem(percent_text)
+            try:
+                time_text = time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))
+            except (TypeError, ValueError, OSError, OverflowError):
+                time_text = '—'
+            time_item = QTableWidgetItem(time_text)
+            rel_item = QTableWidgetItem(rel)
+            rel_item.setToolTip(path)
+            for col, item in enumerate((name_item, size_item, percent_item, time_item, rel_item)):
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row, col, item)
+        if items:
+            self.table.selectRow(0)
+
+    def _selected_entry(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        if item is None:
+            return None
+        entry = item.data(Qt.UserRole)
+        if isinstance(entry, dict):
+            return entry
+        return None
+
+    def _reveal_row(self, row):
+        if row is not None and row >= 0:
+            self.table.selectRow(row)
+        self._reveal_selected()
+
+    def _reveal_selected(self):
+        entry = self._selected_entry()
+        if not entry:
+            QMessageBox.information(self, '提示', '请先选择一个文件')
+            return
+        path = entry.get('path')
+        try:
+            shown = _reveal_path_in_explorer(path)
+        except Exception as error:
+            QMessageBox.warning(self, '错误', '无法在资源管理器中显示：%s' % error)
+            return
+        parent = self.parent()
+        if parent is not None and hasattr(parent, 'statusBar'):
+            try:
+                parent.statusBar().showMessage('已在资源管理器中显示: %s' % shown)
+            except Exception:
+                pass
+
+    def _copy_full_path(self):
+        entry = self._selected_entry()
+        if not entry:
+            QMessageBox.information(self, '提示', '请先选择一个文件')
+            return
+        QApplication.clipboard().setText(entry.get('path') or '')
+        parent = self.parent()
+        if parent is not None and hasattr(parent, 'statusBar'):
+            try:
+                parent.statusBar().showMessage('已复制完整路径: %s' % entry.get('path'))
+            except Exception:
+                pass
+
+    def _copy_relative_path(self):
+        entry = self._selected_entry()
+        if not entry:
+            QMessageBox.information(self, '提示', '请先选择一个文件')
+            return
+        text = entry.get('rel') or _relative_path_for_display(self.root, entry.get('path'))
+        QApplication.clipboard().setText(text)
+        parent = self.parent()
+        if parent is not None and hasattr(parent, 'statusBar'):
+            try:
+                parent.statusBar().showMessage('已复制相对路径: %s' % text)
+            except Exception:
+                pass
+
 class NewProjectDialog(QDialog):
     def __init__(self, parent=None, default_folder=None):
         super().__init__(parent)
@@ -3430,6 +3897,9 @@ class WizardDialog(QDialog):
             <li><b>F2 / 右键重命名</b>：重命名单个文件</li>
             <li><b>右键保存版本</b>：为文件生成日期版本副本（如 S1200-10_20260708.dsn），按当前最大后缀继续递增</li>
             <li><b>右键归档到old文件夹</b>：将选中文件移入同目录下的 old/ 文件夹（自动创建），支持多选</li>
+            <li><b>右键在资源管理器中显示 / 复制路径</b>：打开资源管理器并选中该项，或复制完整/相对路径文本</li>
+            <li><b>Ctrl+Z / 撤回</b>：撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/</li>
+            <li><b>占用分析</b>：列出当前项目最大的文件，双击即可在资源管理器中定位</li>
             <li>复制、保存版本和 ZIP 创建采用无覆盖提交；多选压缩会合并父子关系并排除输出 ZIP 自身</li>
             <li><b>Delete</b>：移入回收站</li>
             <li>右键还可“添加到 zip 压缩包”“智能解压”</li>
@@ -3773,8 +4243,19 @@ class MainWindow(QMainWindow):
         # 状态栏右侧：项目文件数/大小统计（常驻，不与 showMessage 临时消息冲突）
         self._stats_token = 0
         self._stats_thread = None
-        self.folder_stats_label = QLabel('')
+        self._largest_files_token = 0
+        self._largest_files_thread = None
+        self._largest_files_progress = None
+        self._undo_stack = []
+        self.undo_action = QAction('撤回', self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.setEnabled(False)
+        self.undo_action.triggered.connect(self.undo_last_action)
+        self.folder_stats_label = _ClickableLabel('')
         self.folder_stats_label.setStyleSheet('color: #555; padding: 0 8px;')
+        self.folder_stats_label.setCursor(Qt.PointingHandCursor)
+        self.folder_stats_label.setToolTip('点击查看占用分析（当前项目最大文件）')
+        self.folder_stats_label.clicked.connect(self.show_occupancy_analysis)
         self.statusBar().addPermanentWidget(self.folder_stats_label)
         # 在状态栏右侧添加回收站按钮
         self.statusBar().addPermanentWidget(self._create_recycle_btn())
@@ -3829,6 +4310,8 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu('文件')
         file_menu.addAction('新建项目', self.new_project)
         file_menu.addAction('新建文件夹内部结构', self.new_folder_structure)
+        file_menu.addAction('占用分析', self.show_occupancy_analysis)
+        file_menu.addAction(self.undo_action)
         file_menu.addAction('刷新(快捷键F5)', self.refresh_all)
         file_menu.addAction('退出', self.close)
         settings_menu = menubar.addMenu('设置')
@@ -4473,6 +4956,293 @@ class MainWindow(QMainWindow):
         """复制文件到系统剪贴板，并保留程序内粘贴副本功能"""
         return self._copy_paths_to_clipboard([file_path])
 
+    def _copy_path_texts_to_clipboard(self, texts, what='路径'):
+        """Copy path strings as plain text. Does not update file-paste clipboard_paths."""
+        values = []
+        seen = set()
+        for text in texts or []:
+            if not text:
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            values.append(text)
+        if not values:
+            QMessageBox.warning(self, '警告', '没有可复制的路径')
+            return False
+        QApplication.clipboard().setText('\n'.join(values))
+        if len(values) == 1:
+            self.statusBar().showMessage('已复制%s: %s' % (what, values[0]))
+        else:
+            self.statusBar().showMessage('已复制 %d 条%s' % (len(values), what))
+        return True
+
+    def _reveal_paths_in_explorer(self, paths):
+        errors = []
+        for path in paths or []:
+            if not path:
+                continue
+            try:
+                shown = _reveal_path_in_explorer(path)
+                self.statusBar().showMessage('已在资源管理器中显示: %s' % shown)
+                return True
+            except Exception as error:
+                name = os.path.basename(path) or path
+                errors.append('%s: %s' % (name, error))
+        detail = '\n'.join(errors[:8]) if errors else '没有可显示的路径'
+        QMessageBox.warning(self, '错误', '无法在资源管理器中显示\n%s' % detail)
+        return False
+
+    def _close_largest_files_progress(self):
+        progress = getattr(self, '_largest_files_progress', None)
+        self._largest_files_progress = None
+        if progress is None:
+            return
+        try:
+            progress.canceled.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            progress.close()
+            progress.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _cancel_largest_files_job(self):
+        self._largest_files_token = getattr(self, '_largest_files_token', 0) + 1
+        self._close_largest_files_progress()
+        thread = getattr(self, '_largest_files_thread', None)
+        if thread is None:
+            return
+        try:
+            thread.result_ready.disconnect(self._on_largest_files_ready)
+            thread.result_error.disconnect(self._on_largest_files_error)
+        except (TypeError, RuntimeError):
+            pass
+        self._safe_stop_thread(thread, wait=False)
+        self._largest_files_thread = None
+
+    def show_occupancy_analysis(self, folder_path=None):
+        """Scan the current or specified project for the largest files."""
+        if folder_path is True or folder_path is False:
+            folder_path = None
+        root = folder_path or getattr(self, 'current_folder', None)
+        if not root or not os.path.isdir(root):
+            QMessageBox.warning(self, '提示', '请先选择一个项目文件夹')
+            return
+        self._largest_files_token = getattr(self, '_largest_files_token', 0) + 1
+        token = self._largest_files_token
+        old = getattr(self, '_largest_files_thread', None)
+        if old is not None:
+            try:
+                old.result_ready.disconnect(self._on_largest_files_ready)
+                old.result_error.disconnect(self._on_largest_files_error)
+            except (TypeError, RuntimeError):
+                pass
+            self._safe_stop_thread(old, wait=False)
+            self._largest_files_thread = None
+        self._close_largest_files_progress()
+
+        progress = QProgressDialog('正在分析占用…', '取消', 0, 0, self)
+        progress.setWindowTitle('占用分析')
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        self._largest_files_progress = progress
+
+        thread = FolderLargestFilesThread(root, token)
+        self._largest_files_thread = thread
+        thread.result_ready.connect(self._on_largest_files_ready)
+        thread.result_error.connect(self._on_largest_files_error)
+
+        def on_canceled():
+            thread.requestInterruption()
+            thread.quit()
+
+        progress.canceled.connect(on_canceled)
+        thread.start()
+        progress.show()
+
+    def _on_largest_files_ready(self, token, payload):
+        if token != getattr(self, '_largest_files_token', None):
+            return
+        self._close_largest_files_progress()
+        dialog = LargestFilesDialog(payload, self)
+        dialog.exec_()
+
+    def _on_largest_files_error(self, token, message):
+        if token != getattr(self, '_largest_files_token', None):
+            return
+        self._close_largest_files_progress()
+        QMessageBox.warning(self, '占用分析失败', message)
+
+    def _push_undo(self, record):
+        if not isinstance(record, dict):
+            return
+        kind = record.get('kind')
+        if kind == 'create' and not record.get('paths'):
+            return
+        if kind == 'move' and not record.get('pairs'):
+            return
+        if kind == 'rename' and not (record.get('current') and record.get('original')):
+            return
+        stack = list(getattr(self, '_undo_stack', None) or [])
+        stack.append(record)
+        if len(stack) > UNDO_STACK_LIMIT:
+            stack = stack[-UNDO_STACK_LIMIT:]
+        self._undo_stack = stack
+        refresh = getattr(self, '_refresh_undo_action', None)
+        if callable(refresh):
+            refresh()
+
+    def _refresh_undo_action(self):
+        action = getattr(self, 'undo_action', None)
+        stack = getattr(self, '_undo_stack', None) or []
+        if action is None:
+            return
+        if stack:
+            label = stack[-1].get('label') or '上一步'
+            action.setText('撤回%s' % label)
+            action.setEnabled(True)
+        else:
+            action.setText('撤回')
+            action.setEnabled(False)
+
+    def _retarget_persisted_path(self, old_path, new_path):
+        comments = getattr(self, 'comments', None)
+        if isinstance(comments, dict):
+            old_comment = _get_path_mapping_value(comments, old_path)
+            if old_comment is not None:
+                self.comments = {
+                    path: comment for path, comment in comments.items()
+                    if not _same_path(path, old_path)
+                }
+                self.comments[_normalize_persisted_path(new_path)] = old_comment
+                save_comments = getattr(self, 'save_comments', None)
+                if callable(save_comments):
+                    save_comments()
+        settings_changed = False
+        pinned = getattr(self, 'pinned_folders', None)
+        if isinstance(pinned, list) and _path_in_list(pinned, old_path):
+            self.pinned_folders = [
+                new_path if _same_path(path, old_path) else path for path in pinned
+            ]
+            settings_changed = True
+        hidden = getattr(self, 'hidden_folders', None)
+        if isinstance(hidden, list) and _path_in_list(hidden, old_path):
+            self.hidden_folders = [
+                new_path if _same_path(path, old_path) else path for path in hidden
+            ]
+            settings_changed = True
+        save_settings = getattr(self, 'save_settings_to_file', None)
+        if settings_changed and callable(save_settings):
+            save_settings(getattr(self, 'settings', None), getattr(self, 'include_subfolders', False))
+        if _same_path(old_path, getattr(self, 'current_folder', None)):
+            self.current_folder = new_path
+            file_model = getattr(self, 'file_model', None)
+            file_tree = getattr(self, 'file_tree', None)
+            if file_model is not None and hasattr(file_model, 'setRootPath'):
+                file_model.setRootPath(new_path)
+            if file_tree is not None and file_model is not None and hasattr(file_tree, 'setRootIndex'):
+                file_tree.setRootIndex(file_model.index(new_path))
+            update_status = getattr(self, '_update_folder_status_bar', None)
+            if callable(update_status):
+                update_status()
+            self._breadcrumb_path = new_path
+            rebuild = getattr(self, '_rebuild_breadcrumb', None)
+            if callable(rebuild):
+                rebuild()
+        if _same_path(getattr(self, 'last_project_path', None), old_path):
+            self.last_project_path = new_path
+
+    def undo_last_action(self):
+        stack = list(getattr(self, '_undo_stack', None) or [])
+        if not stack:
+            status = getattr(self, 'statusBar', None)
+            if callable(status):
+                status().showMessage('没有可撤回的操作')
+            return False
+        record = stack.pop()
+        self._undo_stack = stack
+        try:
+            ok = self._apply_undo_record(record)
+        except Exception as error:
+            stack.append(record)
+            self._undo_stack = stack
+            self._refresh_undo_action()
+            QMessageBox.warning(self, '撤回失败', str(error))
+            return False
+        self._refresh_undo_action()
+        return ok
+
+    def _apply_undo_record(self, record):
+        kind = record.get('kind')
+        label = record.get('label') or '操作'
+        reset_preview = getattr(self, '_reset_preview', None)
+        if callable(reset_preview):
+            reset_preview()
+        if kind == 'rename':
+            current = record.get('current')
+            original = record.get('original')
+            possible, reason = _undo_rename_possible(current, original)
+            if not possible:
+                QMessageBox.warning(self, '无法撤回', '无法撤回%s：%s' % (label, reason))
+                return False
+            _apply_undo_rename(current, original)
+            retarget = getattr(self, '_retarget_persisted_path', None)
+            if callable(retarget):
+                retarget(current, original)
+            self.statusBar().showMessage('已撤回%s: %s' % (label, os.path.basename(original)))
+            return True
+        if kind == 'move':
+            done = 0
+            errors = []
+            for original, current in record.get('pairs') or []:
+                possible, reason = _undo_rename_possible(current, original)
+                if not possible:
+                    errors.append((current or original, reason))
+                    continue
+                os.rename(current, original)
+                done += 1
+            if done:
+                self.statusBar().showMessage('已撤回%s: %d 项' % (label, done))
+            if errors:
+                details = '\n'.join(
+                    '· %s：%s' % (os.path.basename(path) or path, reason)
+                    for path, reason in errors[:8]
+                )
+                QMessageBox.warning(
+                    self,
+                    '部分撤回失败' if done else '无法撤回',
+                    details,
+                )
+            return done > 0
+        if kind == 'create':
+            backend = _load_strict_recycle_backend()
+
+            def recycle_fn(path, _backend=backend):
+                _send_path_to_recycle_strict(path, backend=_backend)
+
+            successes, errors = _apply_undo_create_paths(record.get('paths') or [], recycle_fn)
+            if successes:
+                self.statusBar().showMessage(
+                    '已撤回%s，%d 项已移入回收站' % (label, len(successes))
+                )
+            if errors:
+                details = '\n'.join(
+                    '· %s：%s' % (os.path.basename(path) or path, message)
+                    for path, message in errors[:8]
+                )
+                QMessageBox.warning(
+                    self,
+                    '部分撤回失败' if successes else '无法撤回',
+                    details,
+                )
+            return bool(successes)
+        QMessageBox.warning(self, '无法撤回', '不支持撤回该操作')
+        return False
+
     def copy_selected_items(self):
         selected_paths = self._get_selected_file_paths()
         if selected_paths:
@@ -4856,8 +5626,10 @@ class MainWindow(QMainWindow):
             'scan_thread': ('scan_completed', 'scan_progress'),
             '_video_thumb_thread': ('frames_ready',),
             '_check_update_thread': ('result_ready',),
+            '_largest_files_thread': ('result_ready', 'result_error'),
         }
-        for attr in ('_stats_thread', '_search_thread', 'scan_thread', '_video_thumb_thread', '_check_update_thread'):
+        self._close_largest_files_progress()
+        for attr in ('_stats_thread', '_search_thread', 'scan_thread', '_video_thumb_thread', '_check_update_thread', '_largest_files_thread'):
             t = getattr(self, attr, None)
             if t is not None:
                 try:
@@ -5067,6 +5839,9 @@ class MainWindow(QMainWindow):
         else:
             pin_action = menu.addAction('置顶')
         terminal_action = menu.addAction('在终端中打开')
+        reveal_action = menu.addAction('在资源管理器中显示')
+        copy_path_action = menu.addAction('复制路径')
+        occupancy_action = menu.addAction('占用分析')
         menu.addSeparator()
         hide_action = menu.addAction('隐藏项目')
         action_pos = table.viewport().mapToGlobal(pos)
@@ -5080,6 +5855,12 @@ class MainWindow(QMainWindow):
             self.save_settings_to_file(self.settings, self.include_subfolders)
         elif chosen == terminal_action:
             self.open_folder_in_terminal(folder_path)
+        elif chosen == reveal_action:
+            self._reveal_paths_in_explorer([folder_path])
+        elif chosen == copy_path_action:
+            self._copy_path_texts_to_clipboard([folder_path], '路径')
+        elif chosen == occupancy_action:
+            self.show_occupancy_analysis(folder_path)
         elif chosen == hide_action:
             if not _path_in_list(self.hidden_folders, folder_path):
                 self.hidden_folders.append(_normalize_persisted_path(folder_path))
@@ -5100,6 +5881,7 @@ class MainWindow(QMainWindow):
                 # 清空文件统计 + 取消在跑的统计线程
                 self._stats_token += 1
                 self.folder_stats_label.setText('')
+                self._cancel_largest_files_job()
                 stats_t = getattr(self, '_stats_thread', None)
                 if stats_t is not None and stats_t.isRunning():
                     stats_t.requestInterruption()
@@ -5662,6 +6444,9 @@ class MainWindow(QMainWindow):
             is_archive = ext in ['.zip', '.rar', '.7z']
 
             copy_action = menu.addAction('复制')
+            copy_full_action = menu.addAction('复制完整路径')
+            copy_rel_action = menu.addAction('复制相对路径')
+            reveal_action = menu.addAction('在资源管理器中显示')
             add_to_zip_action = menu.addAction('添加到zip压缩包')
 
             paste_copy_action = None
@@ -5692,6 +6477,13 @@ class MainWindow(QMainWindow):
 
             if action == copy_action:
                 self._copy_paths_to_clipboard(selected_paths)
+            elif action == copy_full_action:
+                self._copy_path_texts_to_clipboard(selected_paths, '完整路径')
+            elif action == copy_rel_action:
+                rels = [_relative_path_for_display(self.current_folder, item_path) for item_path in selected_paths]
+                self._copy_path_texts_to_clipboard(rels, '相对路径')
+            elif action == reveal_action:
+                self._reveal_paths_in_explorer(selected_paths)
             elif action == add_to_zip_action:
                 if multi_selected:
                     self.add_paths_to_zip(selected_paths)
@@ -5774,13 +6566,19 @@ class MainWindow(QMainWindow):
         target_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
 
         pasted = 0
+        created = []
         errors = []
         for source in sources:
             try:
-                self._paste_single(source, target_dir)
+                dest = self._paste_single(source, target_dir)
                 pasted += 1
+                if dest:
+                    created.append(dest)
             except Exception as e:
                 errors.append(f"{os.path.basename(source)}: {str(e)}")
+        push_undo = getattr(self, '_push_undo', None)
+        if callable(push_undo) and created:
+            push_undo(_make_undo_create(created, '粘贴副本'))
 
         if errors:
             QMessageBox.warning(self, "错误", "粘贴副本失败:\n" + "\n".join(errors))
@@ -5816,12 +6614,12 @@ class MainWindow(QMainWindow):
 
         if os.path.isdir(source_path):
             shutil.copytree(source_path, dest)
-            return
+            return dest
 
         while True:
             try:
                 _copy_file_exclusive(source_path, dest)
-                return
+                return dest
             except FileExistsError:
                 dest = os.path.join(target_dir, f'{base_name_without_copy}_副本{counter}{ext}')
                 counter += 1
@@ -5886,6 +6684,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '错误', f'保存版本失败: 当天版本数量已达上限（{MAX_VERSION_RANKS + 1} 个）')
                 return
             self.statusBar().showMessage(f'已保存版本: {new_name}')
+            push_undo = getattr(self, '_push_undo', None)
+            if callable(push_undo):
+                push_undo(_make_undo_create([new_path], '保存版本'))
         except Exception as e:
             QMessageBox.warning(self, '错误', f'保存版本失败: {str(e)}')
 
@@ -5910,37 +6711,12 @@ class MainWindow(QMainWindow):
             self._reset_preview()
             os.rename(file_path, new_path)
             self.statusBar().showMessage(f'已重命名: {old_name} -> {new_name}')
-
-            settings_changed = False
-            old_comment = _get_path_mapping_value(self.comments, file_path)
-            if old_comment is not None:
-                self.comments = {
-                    path: comment for path, comment in self.comments.items()
-                    if not _same_path(path, file_path)
-                }
-                self.comments[_normalize_persisted_path(new_path)] = old_comment
-                self.save_comments()
-            if _path_in_list(self.pinned_folders, file_path):
-                self.pinned_folders = [new_path if _same_path(path, file_path) else path for path in self.pinned_folders]
-                settings_changed = True
-            if _path_in_list(self.hidden_folders, file_path):
-                self.hidden_folders = [new_path if _same_path(path, file_path) else path for path in self.hidden_folders]
-                settings_changed = True
-            if settings_changed:
-                self.save_settings_to_file(self.settings, self.include_subfolders)
-
-            # 如果重命名的是当前项目文件夹，更新current_folder
-            if _same_path(file_path, self.current_folder):
-                self.current_folder = new_path
-                self.file_model.setRootPath(new_path)
-                self.file_tree.setRootIndex(self.file_model.index(new_path))
-                self._update_folder_status_bar()
-                # 面包屑焦点回到新的项目根
-                self._breadcrumb_path = new_path
-                self._rebuild_breadcrumb()
-            # 同步更新「上次项目」记录，避免下次启动恢复指向旧名字
-            if _same_path(getattr(self, 'last_project_path', None), file_path):
-                self.last_project_path = new_path
+            retarget = getattr(self, '_retarget_persisted_path', None)
+            if callable(retarget):
+                retarget(file_path, new_path)
+            push_undo = getattr(self, '_push_undo', None)
+            if callable(push_undo):
+                push_undo(_make_undo_rename(new_path, file_path, '重命名'))
         except Exception as e:
             QMessageBox.warning(self, "错误", f"重命名失败: {str(e)}")
     
@@ -5973,6 +6749,9 @@ class MainWindow(QMainWindow):
                         pass
                     raise
             self.statusBar().showMessage(f"已创建压缩包: {zip_name}")
+            push_undo = getattr(self, '_push_undo', None)
+            if callable(push_undo):
+                push_undo(_make_undo_create([zip_path], '创建压缩包'))
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建压缩包失败: {str(e)}")
 
@@ -6020,6 +6799,9 @@ class MainWindow(QMainWindow):
                         pass
                     raise
             self.statusBar().showMessage(f"已创建压缩包: {zip_name}")
+            push_undo = getattr(self, '_push_undo', None)
+            if callable(push_undo):
+                push_undo(_make_undo_create([zip_path], '创建压缩包'))
         except Exception as e:
             QMessageBox.warning(self, "错误", f"创建压缩包失败: {str(e)}")
 
@@ -6216,6 +6998,7 @@ class MainWindow(QMainWindow):
             self._reset_preview()
             moved = 0
             skipped = []
+            moved_pairs = []
             for file_path in file_paths:
                 if not os.path.exists(file_path):
                     continue
@@ -6252,8 +7035,12 @@ class MainWindow(QMainWindow):
                 if moved_path is None:
                     raise Exception('无法生成唯一的归档文件名（已尝试 100001 次），请清理 old/ 目录') from None
                 moved += 1
+                moved_pairs.append((file_path, moved_path))
             if moved:
                 self.statusBar().showMessage(f'已归档 {moved} 个项目到 old/')
+                push_undo = getattr(self, '_push_undo', None)
+                if callable(push_undo) and moved_pairs:
+                    push_undo(_make_undo_move(moved_pairs, '归档到 old/'))
             if skipped:
                 QMessageBox.information(
                     self,
@@ -7366,8 +8153,8 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>0.6.6 修正 Windows PAC/WPAD 选项结构体，确保系统代理解析按 WinHTTP ABI 传递；'
-            '并保留此前的系统代理/PAC 支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
+            '<p>0.6.7 增加占用分析、资源管理器选中/复制路径，以及 Ctrl+Z 撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/；'
+            '并保留此前的 PAC/系统代理支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
         )
@@ -7449,7 +8236,7 @@ class MainWindow(QMainWindow):
 <li><b>单击</b>项目行：在右侧文件树中显示该项目的文件</li>
 <li><b>双击编号列</b>：在系统资源管理器中打开该项目文件夹</li>
 <li><b>双击注释列</b>：编辑项目注释，注释会自动保存到 <code>seavo_comments.json</code></li>
-<li><b>右键项目行</b>：置顶 / 取消置顶、在终端中打开、隐藏项目；置顶项会加粗并排在列表前部</li>
+<li><b>右键项目行</b>：置顶 / 取消置顶、在终端中打开、在资源管理器中显示、复制路径、占用分析、隐藏项目；置顶项会加粗并排在列表前部</li>
 <li><b>隐藏项目</b>：不常用或已归档项目可隐藏；如需找回，请使用 <b>设置 → 恢复已隐藏项目</b></li>
 <li><b>文件夹搜索框</b>：输入编号、注释或路径关键词实时过滤项目列表</li>
 </ul>
@@ -7479,9 +8266,12 @@ class MainWindow(QMainWindow):
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
+<li><b>撤回（Ctrl+Z）</b>：撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。撤回创建类操作会把新文件移入回收站，不会永久删除；原位置被占用时拒绝覆盖。移入回收站本身请到系统回收站还原</li>
 <li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并始终定位到所选路径</li>
+<li><b>在资源管理器中显示</b>：打开资源管理器并选中该文件/文件夹（不是只打开所在目录）</li>
+<li><b>复制完整路径 / 复制相对路径</b>：复制为纯文本，便于粘贴到聊天或文档；不会改写“粘贴副本”用的文件剪贴板</li>
 </ul>
-<p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>添加到zip压缩包</b>、<b>归档到old文件夹</b>、<b>移入回收站</b>。</p>
+<p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>复制完整路径</b>、<b>复制相对路径</b>、<b>在资源管理器中显示</b>、<b>添加到zip压缩包</b>、<b>归档到old文件夹</b>、<b>移入回收站</b>。多选复制路径时以换行拼接；显示时定位第一项。</p>
 <p>在<b>空白处</b>右键：仅显示<b>粘贴副本</b>，粘贴到当前项目文件夹。</p>
 
 <p><b>4. 复制与粘贴的目标规则</b></p>
@@ -7547,7 +8337,7 @@ class MainWindow(QMainWindow):
 <h3 style="color: #2980b9;">八、界面与导航</h3>
 <ul>
 <li><b>面包屑路径栏</b>：文件树上方显示从项目根到当前点选项的路径（如 <code>S1234 › V01 › BOM</code>）。单击任意目录段可在文件树中定位，双击任意目录段可直接用资源管理器打开该目录；路径过长时中间会自动省略。</li>
-<li><b>状态栏文件统计</b>：选中项目后，状态栏右侧常驻显示该项目递归的<b>文件数与总大小</b>，在后台计算不卡界面；切换项目会自动更新。</li>
+<li><b>状态栏文件统计</b>：选中项目后，状态栏右侧常驻显示该项目递归的<b>文件数与总大小</b>，在后台计算不卡界面；切换项目会自动更新。点击该统计可打开<b>占用分析</b>，列出当前项目最大的文件，双击即可在资源管理器中选中。</li>
 <li><b>记住窗口与项目</b>：退出时记住窗口大小/位置、左右分栏宽度、是否最大化，以及上次打开的项目；下次启动自动恢复。若上次项目已被删除/改名/隐藏，则安全跳过不报错。</li>
 <li><b>全屏已禁用</b>：本程序不支持全屏模式（避免菜单与关闭按钮不可见），按 F11 等不会进入全屏。</li>
 </ul>
@@ -7579,6 +8369,7 @@ class MainWindow(QMainWindow):
 <tr><td>F2</td><td>重命名文件树中选中的单个文件/文件夹</td></tr>
 <tr><td>Ctrl+C</td><td>复制选中的文件/文件夹（支持多选）</td></tr>
 <tr><td>Ctrl+V</td><td>粘贴副本到选中文件夹或当前项目</td></tr>
+<tr><td>Ctrl+Z</td><td>撤回最近一次重命名 / 粘贴副本 / 保存版本 / 创建压缩包 / 归档到 old/</td></tr>
 <tr><td>Delete</td><td>将选中的文件/文件夹移入回收站（支持多选）</td></tr>
 <tr><td>← ↑</td><td>视频帧查看器:切换到上一帧</td></tr>
 <tr><td>→ ↓</td><td>视频帧查看器:切换到下一帧</td></tr>

@@ -1530,6 +1530,305 @@ class FolderStructureNormalizationTests(unittest.TestCase):
             )
 
 
+
+
+class OccupancyAnalysisTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = main.QApplication.instance() or main.QApplication([])
+
+    def test_explorer_select_command_keeps_path_as_own_argument(self):
+        path = os.path.join(r'D:\资料', 'file with space.dsn')
+        cmd = main._explorer_select_command(path)
+        self.assertEqual(len(cmd), 3)
+        self.assertTrue(cmd[0].lower().endswith('explorer.exe'))
+        self.assertEqual(os.path.basename(cmd[0]).lower(), 'explorer.exe')
+        self.assertEqual(cmd[1], '/select,')
+        self.assertEqual(cmd[2], os.path.normpath(os.path.abspath(path)))
+        self.assertNotIn(cmd[2], cmd[1])
+        self.assertFalse(cmd[1].startswith('/select,' + cmd[2][:3]))
+
+    def test_explorer_select_command_preserves_spaces_chinese_and_unc(self):
+        local = os.path.join(r'D:\原理图 资料', 'S1200 (1).dsn')
+        cmd = main._explorer_select_command(local)
+        self.assertEqual(cmd[1], '/select,')
+        self.assertEqual(cmd[2], os.path.normpath(os.path.abspath(local)))
+        self.assertIn('原理图 资料', cmd[2])
+        self.assertIn('S1200 (1).dsn', cmd[2])
+
+        unc = r'\\server\share\原理图\a.dsn'
+        cmd = main._explorer_select_command(unc)
+        self.assertEqual(cmd[1], '/select,')
+        self.assertEqual(cmd[2], os.path.normpath(os.path.abspath(unc)))
+        self.assertTrue(cmd[2].startswith('\\\\') or cmd[2].startswith('//'))
+        self.assertIn('原理图', cmd[2])
+
+    def test_relative_path_inside_root_and_different_drive(self):
+        root = r'D:\proj\S1200'
+        inside = os.path.join(root, 'BOM', 'a.txt')
+        self.assertEqual(
+            main._relative_path_for_display(root, inside),
+            os.path.join('BOM', 'a.txt'),
+        )
+        self.assertEqual(
+            main._relative_path_for_display(root, root),
+            '.',
+        )
+        outside = r'E:\other\a.txt'
+        self.assertEqual(
+            main._relative_path_for_display(root, outside),
+            os.path.normpath(os.path.abspath(outside)),
+        )
+
+    def test_collect_largest_files_returns_top_n_sorted(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            sizes = {
+                'tiny.bin': 10,
+                'small.bin': 20,
+                'mid.bin': 40,
+                'big.bin': 80,
+                'huge.bin': 160,
+            }
+            os.makedirs(os.path.join(root, 'sub'))
+            for name, size in sizes.items():
+                target = os.path.join(root, 'sub' if name == 'huge.bin' else '', name)
+                with open(target, 'wb') as stream:
+                    stream.write(b'x' * size)
+            payload = main._collect_largest_files(root, top_n=3)
+            names = [os.path.basename(item['path']) for item in payload['items']]
+            self.assertEqual(names, ['huge.bin', 'big.bin', 'mid.bin'])
+            self.assertEqual(payload['count'], 5)
+            self.assertEqual(payload['total'], 10 + 20 + 40 + 80 + 160)
+            self.assertFalse(payload['truncated'])
+            self.assertEqual(payload['items'][0]['rel'], os.path.join('sub', 'huge.bin'))
+
+    def test_collect_largest_files_skips_reparse_dirs_and_files(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            keep = os.path.join(root, 'keep.bin')
+            skip_dir = os.path.join(root, 'skipdir')
+            os.makedirs(skip_dir)
+            skipped_in_dir = os.path.join(skip_dir, 'nested.bin')
+            skip_file = os.path.join(root, 'link.bin')
+            with open(keep, 'wb') as stream:
+                stream.write(b'a' * 10)
+            with open(skipped_in_dir, 'wb') as stream:
+                stream.write(b'b' * 100)
+            with open(skip_file, 'wb') as stream:
+                stream.write(b'c' * 80)
+
+            def fake_reparse(path):
+                name = os.path.basename(path)
+                return name in ('skipdir', 'link.bin')
+
+            with mock.patch.object(main, '_is_reparse_point', side_effect=fake_reparse):
+                payload = main._collect_largest_files(root, top_n=10)
+            names = [os.path.basename(item['path']) for item in payload['items']]
+            self.assertEqual(names, ['keep.bin'])
+            self.assertEqual(payload['count'], 1)
+
+    def test_collect_largest_files_canceled_returns_none(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            path = os.path.join(root, 'a.bin')
+            with open(path, 'wb') as stream:
+                stream.write(b'x')
+            self.assertIsNone(main._collect_largest_files(root, is_canceled=lambda: True))
+
+    def test_copy_path_texts_does_not_update_file_clipboard(self):
+        class Stub(object):
+            clipboard_paths = ['keep-me']
+            clipboard_path = 'keep-me'
+
+            def statusBar(self):
+                return SimpleNamespace(showMessage=lambda *args, **kwargs: None)
+
+        stub = Stub()
+        stub._copy_path_texts_to_clipboard = main.MainWindow._copy_path_texts_to_clipboard.__get__(stub)
+        with mock.patch.object(main.QApplication, 'clipboard') as clipboard_factory:
+            clipboard = mock.Mock()
+            clipboard_factory.return_value = clipboard
+            ok = stub._copy_path_texts_to_clipboard([r'D:\资料\a.dsn', r'D:\资料\b.dsn'], '完整路径')
+        self.assertTrue(ok)
+        clipboard.setText.assert_called_once_with(r'D:\资料\a.dsn' + '\n' + r'D:\资料\b.dsn')
+        self.assertEqual(stub.clipboard_paths, ['keep-me'])
+        self.assertEqual(stub.clipboard_path, 'keep-me')
+
+
+
+class UndoActionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = main.QApplication.instance() or main.QApplication([])
+
+    def _window(self):
+        class Stub(object):
+            def __init__(self):
+                self._undo_stack = []
+                self.undo_action = None
+                self.comments = {}
+                self.pinned_folders = []
+                self.hidden_folders = []
+                self.current_folder = None
+                self.last_project_path = None
+                self.settings = {}
+                self.include_subfolders = False
+                self.messages = []
+
+            def _reset_preview(self):
+                pass
+
+            def statusBar(self):
+                return SimpleNamespace(showMessage=lambda *args, **kwargs: self.messages.append(args[0] if args else ''))
+
+            def save_comments(self):
+                pass
+
+            def save_settings_to_file(self, settings, include_subfolders):
+                pass
+
+        stub = Stub()
+        stub._push_undo = main.MainWindow._push_undo.__get__(stub)
+        stub._refresh_undo_action = main.MainWindow._refresh_undo_action.__get__(stub)
+        stub._retarget_persisted_path = main.MainWindow._retarget_persisted_path.__get__(stub)
+        stub.undo_last_action = main.MainWindow.undo_last_action.__get__(stub)
+        stub._apply_undo_record = main.MainWindow._apply_undo_record.__get__(stub)
+        stub._paste_single = main.MainWindow._paste_single.__get__(stub)
+        stub.archive_to_old_folder = main.MainWindow.archive_to_old_folder.__get__(stub)
+        return stub
+
+    def test_undo_rename_restores_original_name(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            original = os.path.join(root, 'a.txt')
+            current = os.path.join(root, 'b.txt')
+            with open(original, 'w', encoding='utf-8') as stream:
+                stream.write('x')
+            os.rename(original, current)
+            window = self._window()
+            window._push_undo(main._make_undo_rename(current, original, '重命名'))
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                ok = window.undo_last_action()
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(original))
+            self.assertFalse(os.path.exists(current))
+            self.assertEqual(window._undo_stack, [])
+            warning.assert_not_called()
+
+    def test_undo_rename_refuses_when_original_occupied(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            original = os.path.join(root, 'a.txt')
+            current = os.path.join(root, 'b.txt')
+            with open(original, 'w', encoding='utf-8') as stream:
+                stream.write('keep')
+            with open(current, 'w', encoding='utf-8') as stream:
+                stream.write('new')
+            window = self._window()
+            window._push_undo(main._make_undo_rename(current, original, '重命名'))
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                ok = window.undo_last_action()
+            self.assertFalse(ok)
+            self.assertTrue(os.path.exists(original))
+            self.assertTrue(os.path.exists(current))
+            self.assertEqual(read_text(original), 'keep')
+            self.assertEqual(read_text(current), 'new')
+            warning.assert_called_once()
+
+    def test_undo_create_uses_recycle_backend(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            created = os.path.join(root, 'copy.txt')
+            with open(created, 'w', encoding='utf-8') as stream:
+                stream.write('x')
+            recycled = []
+
+            def fake_backend(path):
+                recycled.append(path)
+                os.remove(path)
+
+            window = self._window()
+            window._push_undo(main._make_undo_create([created], '粘贴副本'))
+            with mock.patch.object(main, '_load_strict_recycle_backend', return_value=fake_backend):
+                with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                    ok = window.undo_last_action()
+            self.assertTrue(ok)
+            self.assertEqual(recycled, [created])
+            self.assertFalse(os.path.exists(created))
+            warning.assert_not_called()
+
+    def test_undo_create_keeps_file_when_recycle_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            created = os.path.join(root, 'copy.txt')
+            with open(created, 'w', encoding='utf-8') as stream:
+                stream.write('keep-me')
+
+            def fake_backend(path):
+                raise OSError('recycle unavailable')
+
+            window = self._window()
+            window._push_undo(main._make_undo_create([created], '保存版本'))
+            with mock.patch.object(main, '_load_strict_recycle_backend', return_value=fake_backend):
+                with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                    ok = window.undo_last_action()
+            self.assertFalse(ok)
+            self.assertTrue(os.path.exists(created))
+            self.assertEqual(read_text(created), 'keep-me')
+            warning.assert_called_once()
+
+    def test_undo_archive_moves_file_back(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            path = os.path.join(root, 'a.txt')
+            with open(path, 'w', encoding='utf-8') as stream:
+                stream.write('x')
+            window = self._window()
+            with mock.patch.object(main.QMessageBox, 'information') as info:
+                with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                    window.archive_to_old_folder([path])
+            archived = os.path.join(root, 'old', 'a.txt')
+            self.assertTrue(os.path.exists(archived))
+            self.assertFalse(os.path.exists(path))
+            info.assert_not_called()
+            warning.assert_not_called()
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                ok = window.undo_last_action()
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(archived))
+            warning.assert_not_called()
+
+    def test_undo_archive_refuses_when_original_occupied(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            original = os.path.join(root, 'a.txt')
+            current = os.path.join(root, 'old', 'a.txt')
+            os.makedirs(os.path.join(root, 'old'))
+            with open(original, 'w', encoding='utf-8') as stream:
+                stream.write('keep')
+            with open(current, 'w', encoding='utf-8') as stream:
+                stream.write('archived')
+            window = self._window()
+            window._push_undo(main._make_undo_move([(original, current)], '归档到 old/'))
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                ok = window.undo_last_action()
+            self.assertFalse(ok)
+            self.assertEqual(read_text(original), 'keep')
+            self.assertEqual(read_text(current), 'archived')
+            warning.assert_called_once()
+
+    def test_undo_empty_stack_does_not_raise(self):
+        window = self._window()
+        with mock.patch.object(main.QMessageBox, 'warning') as warning:
+            ok = window.undo_last_action()
+        self.assertFalse(ok)
+        warning.assert_not_called()
+
+    def test_paste_single_returns_unique_destination(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            source = os.path.join(root, 'a.txt')
+            with open(source, 'w', encoding='utf-8') as stream:
+                stream.write('x')
+            window = self._window()
+            first = window._paste_single(source, root)
+            self.assertTrue(first.endswith('_副本1.txt') or os.path.basename(first).endswith('_副本1.txt'))
+            self.assertTrue(os.path.exists(first))
+            self.assertTrue(os.path.exists(source))
+
+
 class FolderThreadErrorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1557,6 +1856,15 @@ class FolderThreadErrorTests(unittest.TestCase):
             search.run()
         self.assertEqual([event[0] for event in events], ['error'])
 
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            with mock.patch.object(main.os, 'walk', side_effect=failing_walk):
+                largest = main.FolderLargestFilesThread(root, 11)
+                events = []
+                largest.result_ready.connect(lambda *args: events.append(('ready', args)))
+                largest.result_error.connect(lambda *args: events.append(('error', args)))
+                largest.run()
+            self.assertEqual([event[0] for event in events], ['error'])
+
     def test_missing_root_emits_error_for_stats(self):
         with tempfile.TemporaryDirectory() as root:
             missing = os.path.join(root, 'missing')
@@ -1580,6 +1888,18 @@ class FolderThreadErrorTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0][0], 'error')
             self.assertEqual(events[0][1][0], 8)
+
+    def test_missing_root_emits_error_for_largest_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            missing = os.path.join(root, 'missing')
+            thread = main.FolderLargestFilesThread(missing, 12)
+            events = []
+            thread.result_ready.connect(lambda *args: events.append(('ready', args)))
+            thread.result_error.connect(lambda *args: events.append(('error', args)))
+            thread.run()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0][0], 'error')
+            self.assertEqual(events[0][1][0], 12)
 
 
 class OldArchiveGuardTests(unittest.TestCase):
