@@ -10,6 +10,8 @@ v0.6.3（2026-10-02）已发布：annotated tag `v0.6.3`（tag object `f9ff8f293
 
 v0.6.4（2026-10-03）已发布：annotated tag `v0.6.4`（tag object `c53fa30c93eac940674a316ab966cb2013471cd7`）指向 `b6fbe3e3ed762aeb8b0f724bf72ba26d99fb49cf`，EXE 96,580,120 bytes，SHA-256 `D2698016CECCACD1C793E093CEA9A41F4CAECB427918CFD05573DB1E143DD0AD`；使用自签名证书，远端三资产 digest 已核对。本版同步更新程序内关于/帮助/向导和 README、打包指南描述。
 
+v0.6.5（2026-10-06）已发布：annotated tag `v0.6.5`（tag object `9472ed85d775f26ff54c83f6c431dc086bc429a9`）指向 `aee6743abde1e347e75cb7564ea66d9402c5735d`，EXE 96,584,992 bytes，SHA-256 `624D51171EC7AC57B04913E9D3C84F5B9752A848D5009BEC36F8D665F6737F60`；使用自签名证书，远端三资产 digest 已核对。本版支持环境代理、Windows 系统代理和 PAC/WPAD，并加固配置备份、junction 扫描、old/ 归档及构建 manifest 写入。
+
 
 ## 1. 已验证基线
 
