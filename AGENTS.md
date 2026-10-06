@@ -186,5 +186,7 @@ git status --short
 - 已发布 v0.6.5 EXE 为 96,584,992 bytes，SHA-256：`624D51171EC7AC57B04913E9D3C84F5B9752A848D5009BEC36F8D665F6737F60`；使用自签名证书，远端三资产 digest 已核对。本版增加环境/系统/PAC 代理支持，并加固配置备份、junction 扫描、old/ 归档和构建 manifest 写入。
 - annotated tag `v0.6.6`（tag object `66ca6b22ed1b019332044734c5b0f2e5151a4d28`）指向 `3f2d20a12a423c533d0d084996c0ecb2060c09dc`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.6
 - 已发布 v0.6.6 EXE 为 96,973,960 bytes，SHA-256：`EDE1169F4FA1AFB1BBA634F12CA11993F4844F5F20AA56C4108A2EE7CC72BC67`；使用自签名证书，远端三资产 digest 已核对。本版修正 Windows PAC/WPAD 选项结构体，使系统代理解析符合 WinHTTP ABI。
+- annotated tag `v0.6.7`（tag object `69ea35e2b660689dd86dcf1e32a1c45b8c1edd72`）指向 `27a5e1cf2c362b8f03f7f48fead8419415a25f03`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.7
+- 已发布 v0.6.7 EXE 为 96,991,520 bytes，SHA-256：`4F543B0ECEC704B2ED5506BB1FD6BD6A7341CA4DACD6B6EC80FD978EEDB3DBB9`；使用自签名证书，远端三资产 digest 已核对。本版增加占用分析、资源管理器选中/复制路径，以及 Ctrl+Z 撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。
 
 交付时明确报告修改文件、实际执行的检查、构建产物哈希和未执行事项；不要把“语法可解析”表述成“GUI 功能已验证”。

@@ -14,6 +14,8 @@ v0.6.5（2026-10-06）已发布：annotated tag `v0.6.5`（tag object `9472ed85d
 
 v0.6.6（2026-10-06）已发布：annotated tag `v0.6.6`（tag object `66ca6b22ed1b019332044734c5b0f2e5151a4d28`）指向 `3f2d20a12a423c533d0d084996c0ecb2060c09dc`，EXE 96,973,960 bytes，SHA-256 `EDE1169F4FA1AFB1BBA634F12CA11993F4844F5F20AA56C4108A2EE7CC72BC67`；使用自签名证书，远端三资产 digest 已核对。本版修正 Windows PAC/WPAD 选项结构体，使系统代理解析符合 WinHTTP ABI。
 
+v0.6.7（2026-10-06）已发布：annotated tag `v0.6.7`（tag object `69ea35e2b660689dd86dcf1e32a1c45b8c1edd72`）指向 `27a5e1cf2c362b8f03f7f48fead8419415a25f03`，EXE 96,991,520 bytes，SHA-256 `4F543B0ECEC704B2ED5506BB1FD6BD6A7341CA4DACD6B6EC80FD978EEDB3DBB9`；使用自签名证书，远端三资产 digest 已核对。本版增加占用分析、资源管理器选中/复制路径，以及 Ctrl+Z 撤回。
+
 
 ## 1. 已验证基线
 
