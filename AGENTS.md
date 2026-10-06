@@ -18,7 +18,7 @@
 
 SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以 S/M 编号命名的硬件/PCB 项目目录。界面、业务和平台集成集中在约 7,648 行的 `main.py`。
 
-- 当前版本为 0.6.4；运行时版本的首要来源是 `main.py` 的 `APP_VERSION`。
+- 当前版本为 0.6.5；运行时版本的首要来源是 `main.py` 的 `APP_VERSION`。
 - 源码保持 Python 3.8 grammar 兼容；官方 Windows EXE 已验证环境为 Python 3.13.2 x64。
 - UI、用户提示和主要文档使用中文，文本统一 UTF-8。
 - Windows 是实际目标平台，代码使用 `os.startfile`、Windows Shell/`ctypes`、强制回收站接口和固定的 7-Zip 安装位置。
@@ -29,7 +29,7 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 | 路径 | 职责与注意事项 |
 | --- | --- |
 | `main.py` | 应用入口和全部主要产品逻辑；运行行为的首要事实来源。 |
-| `test_safety.py` | 95 项产品安全/回归测试；会导入 PyQt5，但使用临时数据，不应接触真实项目。 |
+| `test_safety.py` | 101 项产品安全/回归测试；会导入 PyQt5，但使用临时数据，不应接触真实项目。 |
 | `test_tooling.py` | 30 项无网络辅助链路测试：版本、哈希、严格环境、manifest、快照、完整遍历、环境净化、tag/draft/assets。 |
 | `requirements.txt` | Python >=3.8 源码运行依赖范围，不含 PyInstaller。 |
 | `requirements-build.txt` | Python 3.13.2 x64 官方构建环境的精确版本锁；除 venv 自带 pip/wheel 外，正式构建拒绝锁外发行包。 |
@@ -85,7 +85,7 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 - `seavoexplorer.json`：项目根、排序、快捷访问、7-Zip、预览、正则、窗口状态和模板等。
 - `seavo_comments.json`：以绝对项目路径为键的用户注释。
 - `safe_write_json()` 使用随机独占临时文件、flush/fsync、`os.replace` 原子替换，并恢复 Windows 隐藏属性。
-- 注释文件读取失败时必须阻止自动保存覆盖原文件。
+- 配置或注释文件读取/备份失败时必须阻止自动保存覆盖原文件。
 
 新增/改名设置项至少同步默认值、加载、保存、对话框、运行时消费者、旧配置兼容和帮助文本。
 
@@ -93,6 +93,7 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 
 - `SEAVO_SIGN_MODE=store|pfx` 启用 Authenticode 签名；manifest 的 `code_signing` 只能通过公开字段白名单记录主体、指纹、验证状态和时间戳，PFX 路径/密码等执行凭据绝不能进入 manifest。
 - `SEAVO_REQUIRE_SIGNING=1` 让 `release.py` 拒绝未签名 manifest；自签名开发构建需同时设置 `SEAVO_SIGN_ALLOW_UNTRUSTED=1`。
+- 网络请求必须通过 `_urlopen_with_proxy()`，支持环境代理、Windows 系统代理及 PAC/WPAD，并只允许 HTTP/HTTPS。
 - 打包后的 EXE 支持 `--apply-update --target ... --pid ... --sha256 ...`：等待旧进程退出后用唯一临时文件和 `ReplaceFileW` 替换并保留 `.old` 备份；源码模式必须拒绝更新模式。
 - 若安装失败且回滚失败，必须停止重试并同时保留 `.old` 备份与下载的新 EXE。
 - 自签名不会消除其他电脑的 SmartScreen 提示，正式发布应换用公共可信证书。
@@ -107,6 +108,7 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 - 删除只允许 Win10/11 现代回收站后端；失败必须保留源文件，绝不降级永久删除。
 - 复制、保存版本、压缩、解压和 `old/` 归档禁止静默覆盖。文件复制采用独占临时文件和无覆盖提交；多选 ZIP 必须剔除父子重复路径、排除输出 ZIP 自身并按成员名去重。
 - ZIP/7Z 智能解压必须保留预检、同盘 staging、完整校验、取消处理和无覆盖提交。
+- 递归扫描/统计/搜索/打包不得进入 junction/reparse point；`old/` 归档必须使用无覆盖原子移动。
 - 7-Zip 配置只能接受名为 `7z.exe` 的现有文件；RAR/7Z 默认不授权，ZIP 不受该开关影响。
 - 关闭某类自动预览后，当前文件仍应显示「显示预览」按钮；点击按钮只对当前目标执行一次手动预览。
 - 压缩包/Excel 等预览必须保留数量与输出上限，避免大文件或大表格长时间占用 UI。
@@ -142,7 +144,7 @@ git diff --check
 git status --short
 ```
 
-当前 125 项测试中，95 项产品测试覆盖版本/裸 `except`、默认路径、终端、回收站、7-Zip 授权、手动预览、路径规范化、预览资源释放、外部剪贴板粘贴、面包屑双击、保存版本后缀递增、更新 `.part`、事务式解压、正则结构安全、文本编码/BOM、zip 去重、folder_structure 归一化、失效根目录错误信号、old/ 守卫和文档一致性；30 项 tooling tests 覆盖构建/发布、代码签名和 manifest 的 fail-closed 契约。它们不是完整 GUI/所有文件格式的端到端测试，报告时必须区分。
+当前 131 项测试中，101 项产品测试覆盖版本/裸 `except`、默认路径、终端、回收站、7-Zip 授权、手动预览、路径规范化、预览资源释放、外部剪贴板粘贴、面包屑双击、保存版本后缀递增、更新 `.part`、事务式解压、正则结构安全、文本编码/BOM、zip 去重、folder_structure 归一化、失效根目录错误信号、old/ 守卫和文档一致性；30 项 tooling tests 覆盖构建/发布、代码签名和 manifest 的 fail-closed 契约。它们不是完整 GUI/所有文件格式的端到端测试，报告时必须区分。
 
 正式 onefile 验证必须使用由 `requirements-build.txt` 创建、未启用 system-site-packages，且除 venv 自带 pip/wheel 外无锁外包的 Python 3.13.2 x64 venv：
 

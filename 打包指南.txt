@@ -187,7 +187,7 @@ $env:SEAVO_REQUIRE_SIGNING="1"
 
 需要 GitHub CLI 2.94.0 或更高版本，并先执行 `gh auth login`。发布脚本必须用上述严格构建 venv 的 Python 运行。
 
-已发布版本不可重复发布；当前发布使用 `v0.6.4`：
+已发布版本不可重复发布；当前发布使用 `v0.6.5`：
 
 ```powershell
 .\.venv-build\Scripts\python.exe release.py vX.Y.Z

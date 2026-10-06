@@ -212,6 +212,74 @@ class PersistenceSafetyTests(unittest.TestCase):
                 self.assertEqual(json.load(stream), {"value": 2})
             self.assertFalse(any(name.endswith('.tmp') for name in os.listdir(root)))
 
+class PersistenceBackupFailureTests(unittest.TestCase):
+    def test_comments_backup_failure_blocks_overwrite(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'seavo_comments.json')
+            with open(path, 'w', encoding='utf-8') as stream:
+                stream.write('{broken json')
+            stub = SimpleNamespace(
+                COMMENTS_FILE=path,
+                _pending_load_warnings=[],
+                _comments_load_failed=False,
+            )
+            stub._backup_corrupt_file = main.MainWindow._backup_corrupt_file.__get__(stub)
+            stub.load_comments = main.MainWindow.load_comments.__get__(stub)
+            with mock.patch.object(main.os, 'replace', side_effect=PermissionError('backup failed')):
+                self.assertEqual(stub.load_comments(), {})
+            self.assertTrue(stub._comments_load_failed)
+
+    def test_settings_backup_failure_blocks_overwrite(self):
+        class Harness:
+            _init_default_settings = main.MainWindow._init_default_settings
+            load_settings = main.MainWindow.load_settings
+            save_settings_to_file = main.MainWindow.save_settings_to_file
+
+            def __init__(self, config_file):
+                self.CONFIG_FILE = config_file
+                self._pending_load_warnings = []
+
+            def _get_default_quick_access_paths(self):
+                return []
+
+            def _backup_corrupt_file(self, _path):
+                return None
+
+        with tempfile.TemporaryDirectory() as root:
+            config_file = os.path.join(root, 'seavoexplorer.json')
+            with open(config_file, 'w', encoding='utf-8') as stream:
+                stream.write('{broken json')
+            harness = Harness(config_file)
+            with mock.patch.object(main.os, 'replace', side_effect=PermissionError('backup failed')):
+                harness.load_settings()
+            self.assertTrue(harness._settings_load_failed)
+            harness.safe_write_json = mock.Mock(return_value=True)
+            with mock.patch.object(main.QMessageBox, 'warning'):
+                self.assertFalse(harness.save_settings_to_file([], False))
+            harness.safe_write_json.assert_not_called()
+
+
+class ProxySupportTests(unittest.TestCase):
+    def test_parse_proxy_list(self):
+        proxies = main._parse_proxy_list('http=127.0.0.1:7897;https=127.0.0.1:7898')
+        self.assertEqual(proxies['http'], 'http://127.0.0.1:7897')
+        self.assertEqual(proxies['https'], 'http://127.0.0.1:7898')
+
+    def test_rejects_non_http_network_url(self):
+        with self.assertRaises(ValueError):
+            main._urlopen_with_proxy(main.urllib.request.Request('file:///tmp/test'), timeout=1)
+
+    def test_urlopen_uses_explicit_proxy_opener(self):
+        request = main.urllib.request.Request('https://example.invalid/file')
+        opener = mock.Mock()
+        opener.open.return_value = SimpleNamespace()
+        with mock.patch.object(main, '_get_proxy_map_for_url', return_value={'https': 'http://127.0.0.1:7897'}):
+            with mock.patch.object(main.urllib.request, 'build_opener', return_value=opener) as build:
+                main._urlopen_with_proxy(request, timeout=5)
+        build.assert_called_once()
+        opener.open.assert_called_once_with(request, timeout=5)
+
+
 class SaveFileVersionTests(unittest.TestCase):
     def _save_version_with_files(self, filenames):
         with tempfile.TemporaryDirectory() as root:
@@ -925,7 +993,7 @@ class UpdateDownloadSafetyTests(unittest.TestCase):
                 counter[0] += 1
                 return counter[0] >= 4
             with mock.patch.object(thread, 'isInterruptionRequested', side_effect=interrupt_late):
-                with mock.patch('urllib.request.urlopen', return_value=FakeResponse(b'hello')):
+                with mock.patch.object(main, '_urlopen_with_proxy', return_value=FakeResponse(b'hello')):
                     result = thread._download_once(1)
 
             self.assertFalse(result)
@@ -1494,6 +1562,23 @@ class OldArchiveGuardTests(unittest.TestCase):
             info.assert_not_called()
             warning.assert_not_called()
 
+
+    def test_old_name_collision_does_not_overwrite(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'a.txt')
+            with open(path, 'w', encoding='utf-8') as stream:
+                stream.write('new')
+            old_dir = os.path.join(root, 'old')
+            os.makedirs(old_dir)
+            existing = os.path.join(old_dir, 'a.txt')
+            with open(existing, 'w', encoding='utf-8') as stream:
+                stream.write('old')
+            window = self._window()
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                window.archive_to_old_folder([path])
+            self.assertEqual(read_text(existing), 'old')
+            self.assertEqual(read_text(os.path.join(old_dir, 'a_1.txt')), 'new')
+            warning.assert_not_called()
 
 class ClipboardPrecedenceTests(unittest.TestCase):
     def test_non_local_url_ignores_stale_internal_paths(self):

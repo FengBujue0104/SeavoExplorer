@@ -22,8 +22,8 @@ from collections import namedtuple
 # 尝试导入OpenCV用于视频缩略图生成
 try:
     import cv2
-    import numpy as np  # OpenCV 依赖探测
-    from PIL import Image  # 可选图像库探测
+    import numpy as np  # noqa: F401
+    from PIL import Image  # noqa: F401
     HAS_OPENCV = True
 except ImportError:
     HAS_OPENCV = False
@@ -438,7 +438,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.4'
+APP_VERSION = '0.6.5'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -464,6 +464,34 @@ def _path_identity(path):
     """返回用于 Windows 路径比较和去重的大小写不敏感键。"""
     normalized = _normalize_persisted_path(path)
     return os.path.normcase(normalized) if normalized else ''
+
+
+def _is_reparse_point(path):
+    """Fail closed for symlinks, junctions and Windows reparse points."""
+    try:
+        if os.path.islink(path):
+            return True
+    except OSError:
+        return True
+    is_junction = getattr(os.path, 'isjunction', None)
+    if callable(is_junction):
+        try:
+            if is_junction(path):
+                return True
+        except OSError:
+            return True
+    if sys.platform == 'win32':
+        try:
+            get_attributes = ctypes.windll.kernel32.GetFileAttributesW
+            get_attributes.argtypes = [ctypes.c_wchar_p]
+            get_attributes.restype = ctypes.c_uint32
+            attributes = get_attributes(str(path))
+            if attributes == 0xFFFFFFFF:
+                return True
+            return bool(attributes & 0x0400)
+        except Exception:
+            return True
+    return False
 
 
 def _same_path(left, right):
@@ -555,7 +583,7 @@ def _copy_file_exclusive(source_path, destination_path):
             os.rename(temporary, destination_path)
         except OSError as error:
             if isinstance(error, FileExistsError) or getattr(error, 'winerror', None) in (80, 183):
-                raise FileExistsError(destination_path)
+                raise FileExistsError(destination_path) from error
             raise
         return destination_path
     finally:
@@ -1702,6 +1730,194 @@ class RenameDialog(QDialog):
     def get_new_name(self):
         return self.new_name
 
+def _normalize_proxy_url(raw_value):
+    """Return one safe HTTP(S) proxy URL, or an empty string."""
+    value = str(raw_value or '').strip().strip('"')
+    if not value:
+        return ''
+    if '://' not in value:
+        value = 'http://' + value
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return ''
+    if parsed.scheme.lower() not in ('http', 'https') or not parsed.hostname:
+        return ''
+    return value
+
+
+def _parse_proxy_list(raw_value):
+    """Parse WinHTTP/env proxy syntax such as http=host:port;https=host:port."""
+    result = {}
+    raw = str(raw_value or '').strip()
+    if not raw:
+        return result
+    for raw_part in re.split(r'[;\s]+', raw):
+        part = raw_part.strip()
+        if not part or part.upper() == 'DIRECT':
+            continue
+        key = None
+        token = part
+        if '=' in part:
+            key, token = part.split('=', 1)
+            key = key.strip().lower()
+        if token.upper().startswith('PROXY '):
+            token = token[6:].strip()
+        proxy_url = _normalize_proxy_url(token)
+        if not proxy_url:
+            continue
+        if key in ('http', 'https'):
+            result[key] = proxy_url
+        elif key in (None, 'all', 'proxy'):
+            result['http'] = proxy_url
+            result['https'] = proxy_url
+    return result
+
+
+def _proxy_wstring(pointer):
+    if not pointer:
+        return ''
+    try:
+        return ctypes.wstring_at(pointer)
+    except (OSError, ValueError):
+        return ''
+
+
+def _free_windows_proxy_pointer(kernel32, pointer):
+    if pointer:
+        try:
+            kernel32.GlobalFree(pointer)
+        except Exception:
+            pass
+
+
+def _get_windows_proxy_for_url(url):
+    """Resolve the current Windows user proxy, including PAC/WPAD if available."""
+    if sys.platform != 'win32':
+        return {}
+    from ctypes import wintypes
+
+    class WINHTTP_CURRENT_USER_IE_PROXY_CONFIG(ctypes.Structure):
+        _fields_ = [
+            ('fAutoDetect', wintypes.BOOL),
+            ('lpszAutoConfigUrl', ctypes.c_void_p),
+            ('lpszProxy', ctypes.c_void_p),
+            ('lpszProxyBypass', ctypes.c_void_p),
+        ]
+
+    class WINHTTP_AUTOPROXY_OPTIONS(ctypes.Structure):
+        _fields_ = [
+            ('dwFlags', wintypes.DWORD),
+            ('dwAutoDetectFlags', wintypes.DWORD),
+            ('lpszAutoConfigUrl', wintypes.LPCWSTR),
+            ('lpszProxy', wintypes.LPWSTR),
+            ('lpszProxyBypass', wintypes.LPWSTR),
+            ('dwReserved', wintypes.DWORD),
+        ]
+
+    class WINHTTP_PROXY_INFO(ctypes.Structure):
+        _fields_ = [
+            ('dwAccessType', wintypes.DWORD),
+            ('lpszProxy', ctypes.c_void_p),
+            ('lpszProxyBypass', ctypes.c_void_p),
+        ]
+
+    winhttp = ctypes.windll.winhttp
+    kernel32 = ctypes.windll.kernel32
+    winhttp.WinHttpGetIEProxyConfigForCurrentUser.argtypes = [ctypes.POINTER(WINHTTP_CURRENT_USER_IE_PROXY_CONFIG)]
+    winhttp.WinHttpGetIEProxyConfigForCurrentUser.restype = wintypes.BOOL
+    winhttp.WinHttpOpen.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    winhttp.WinHttpOpen.restype = wintypes.HANDLE
+    winhttp.WinHttpGetProxyForUrl.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, ctypes.POINTER(WINHTTP_AUTOPROXY_OPTIONS), ctypes.POINTER(WINHTTP_PROXY_INFO)]
+    winhttp.WinHttpGetProxyForUrl.restype = wintypes.BOOL
+    winhttp.WinHttpCloseHandle.argtypes = [wintypes.HANDLE]
+    winhttp.WinHttpCloseHandle.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+    config = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG()
+    if not winhttp.WinHttpGetIEProxyConfigForCurrentUser(ctypes.byref(config)):
+        return {}
+    try:
+        auto_url = _proxy_wstring(config.lpszAutoConfigUrl)
+        config_proxy = _proxy_wstring(config.lpszProxy)
+        config_bypass = _proxy_wstring(config.lpszProxyBypass)
+        if auto_url or config.fAutoDetect:
+            session = winhttp.WinHttpOpen(
+                'SeavoExplorer/%s' % APP_VERSION,
+                0,
+                None,
+                None,
+                0,
+            )
+            if session:
+                options = WINHTTP_AUTOPROXY_OPTIONS()
+                if auto_url:
+                    options.dwFlags = 0x00000002  # WINHTTP_AUTOPROXY_CONFIG_URL
+                    options.lpszAutoConfigUrl = auto_url
+                else:
+                    options.dwFlags = 0x00000001  # WINHTTP_AUTOPROXY_AUTO_DETECT
+                    options.dwAutoDetectFlags = 0x00000001 | 0x00000002  # DHCP + DNS/WPAD
+                options.lpszProxy = config_proxy
+                options.lpszProxyBypass = config_bypass
+                info = WINHTTP_PROXY_INFO()
+                try:
+                    if winhttp.WinHttpGetProxyForUrl(
+                        session,
+                        str(url),
+                        ctypes.byref(options),
+                        ctypes.byref(info),
+                    ):
+                        return _parse_proxy_list(_proxy_wstring(info.lpszProxy))
+                finally:
+                    try:
+                        winhttp.WinHttpCloseHandle(session)
+                    except Exception:
+                        pass
+                    _free_windows_proxy_pointer(kernel32, info.lpszProxy)
+                    _free_windows_proxy_pointer(kernel32, info.lpszProxyBypass)
+        return _parse_proxy_list(config_proxy)
+    except Exception:
+        return {}
+    finally:
+        _free_windows_proxy_pointer(kernel32, config.lpszAutoConfigUrl)
+        _free_windows_proxy_pointer(kernel32, config.lpszProxy)
+        _free_windows_proxy_pointer(kernel32, config.lpszProxyBypass)
+
+def _get_proxy_map_for_url(url):
+    """Combine environment proxy variables with Windows system/PAC settings."""
+    proxies = dict(urllib.request.getproxies())
+    if sys.platform == 'win32' and not proxies.get('all') and (
+        not proxies.get('http') or not proxies.get('https')
+    ):
+        windows_proxies = _get_windows_proxy_for_url(url)
+        for key in ('http', 'https'):
+            if not proxies.get(key) and windows_proxies.get(key):
+                proxies[key] = windows_proxies[key]
+    return proxies
+
+
+def _validate_network_url(url):
+    """Allow only HTTP(S) URLs with a host before opening a network request."""
+    value = str(url or '').strip()
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError as error:
+        raise ValueError('网络地址无效') from error
+    if parsed.scheme.lower() not in ('http', 'https') or not parsed.hostname:
+        raise ValueError('网络地址必须使用 HTTP 或 HTTPS')
+    return value
+
+
+def _urlopen_with_proxy(request, timeout):
+    """Open a URL through explicit proxy settings when one is available."""
+    url = _validate_network_url(getattr(request, 'full_url', None) or str(request))
+    proxies = _get_proxy_map_for_url(url)
+    handlers = []
+    if proxies:
+        handlers.append(urllib.request.ProxyHandler(proxies))
+    opener = urllib.request.build_opener(*handlers)
+    return opener.open(request, timeout=timeout)
+
 class UpdateDownloadIntegrityError(Exception):
     """下载内容与发布方提供的 SHA-256 摘要不一致（重试无意义，直接失败）。"""
 
@@ -1776,7 +1992,7 @@ class UpdateDownloadThread(QThread):
                         break
                     digest.update(chunk)
         except OSError as e:
-            raise UpdateDownloadIntegrityError(f'无法读取下载文件进行校验: {e}')
+            raise UpdateDownloadIntegrityError(f'无法读取下载文件进行校验: {e}') from e
         return digest.hexdigest()
 
     def _download_once(self, attempt):
@@ -1785,7 +2001,7 @@ class UpdateDownloadThread(QThread):
             existing = 0
             self._reset_partial()
         request = self._make_request(existing)
-        with urllib.request.urlopen(request, timeout=self.DOWNLOAD_TIMEOUT) as response:
+        with _urlopen_with_proxy(request, timeout=self.DOWNLOAD_TIMEOUT) as response:
             code = getattr(response, 'status', response.getcode())
             resumed = existing > 0 and code == 206
             if existing > 0 and code != 206:
@@ -1856,7 +2072,7 @@ class UpdateDownloadThread(QThread):
                 raise http.client.IncompleteRead(b'', total - downloaded)
             if os.path.exists(self.save_path):
                 try:
-                    os.chmod(self.save_path, 0o666)
+                    os.chmod(self.save_path, stat.S_IWRITE | stat.S_IREAD)
                 except OSError:
                     pass
             # 内容完整性校验：与发布方 SHA-256 摘要比对（若提供），避免续传拼接/传输损坏交付坏文件
@@ -1917,7 +2133,7 @@ class UpdateDownloadThread(QThread):
         if isinstance(last_error, urllib.error.HTTPError):
             message = f'GitHub 返回错误：HTTP {last_error.code}'
         elif isinstance(last_error, urllib.error.URLError):
-            message = f'网络连接失败：{last_error.reason}'
+            message = f'网络连接失败（已尝试环境代理和 Windows 系统代理/PAC）：{last_error.reason}'
         if isinstance(last_error, UpdateDownloadIntegrityError):
             # 内容校验失败：临时文件已在 _download_once 内清理（内容错误续传无意义）
             cleanup_error = self._reset_partial()
@@ -2044,7 +2260,7 @@ class CheckUpdateThread(QThread):
                     'User-Agent': f'SeavoExplorer/{APP_VERSION}',
                 },
             )
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with _urlopen_with_proxy(request, timeout=20) as response:
                 data = json.loads(response.read().decode('utf-8'))
             self.result_ready.emit(data)
         except Exception as e:
@@ -2065,9 +2281,14 @@ class FolderScanThread(QThread):
         # 线程安全：在创建时快照正则，不在运行中读共享状态
         self._mb_regex = mb_regex or DEFAULT_MB_RE
         self._db_regex = db_regex or DEFAULT_DB_RE
+        self._scan_visited = set()
 
     def _scan_directory(self, directory, dir_name, motherboard_folders, daughterboard_folders):
         """扫描单个目录，收集匹配的项目文件夹"""
+        directory_key = _path_identity(directory)
+        if not directory_key or directory_key in self._scan_visited:
+            return
+        self._scan_visited.add(directory_key)
         if self.isInterruptionRequested() or not os.path.exists(directory):
             return
         try:
@@ -2076,7 +2297,7 @@ class FolderScanThread(QThread):
                 if self.isInterruptionRequested():
                     return
                 item_path = os.path.join(directory, item)
-                if os.path.isdir(item_path) and not os.path.islink(item_path):
+                if os.path.isdir(item_path) and not _is_reparse_point(item_path):
                     # 先匹配主板，再匹配子卡（双正则独立）
                     mb_match = self._mb_regex.match(item)
                     db_match = self._db_regex.match(item)
@@ -2161,6 +2382,7 @@ class FolderStatsThread(QThread):
 
         try:
             for dirpath, dirnames, filenames in os.walk(self.root, onerror=on_walk_error):
+                dirnames[:] = [name for name in dirnames if not _is_reparse_point(os.path.join(dirpath, name))]
                 if self.isInterruptionRequested():
                     return
                 for name in filenames:
@@ -2216,6 +2438,7 @@ class FileSearchThread(QThread):
 
         try:
             for dirpath, dirnames, filenames in os.walk(self.root, onerror=on_walk_error):
+                dirnames[:] = [name for name in dirnames if not _is_reparse_point(os.path.join(dirpath, name))]
                 if self.isInterruptionRequested():
                     return
                 for name in filenames:
@@ -2447,7 +2670,7 @@ class NewStructureDialog(QDialog):
         if self.project_folder:
             project_info_group = QGroupBox('项目信息')
             project_info_layout = QHBoxLayout()
-            project_info_label = QLabel(f'当前项目文件夹：')
+            project_info_label = QLabel('当前项目文件夹：')
             project_path_label = QLabel(self.project_folder)
             project_path_label.setWordWrap(True)
             project_path_label.setToolTip(self.project_folder)
@@ -2546,7 +2769,7 @@ class NewStructureDialog(QDialog):
         """将常用文件夹恢复为默认勾选状态，并删除所有自定义文件夹"""
         self.selected_folders = {name: True for name in self.folder_names}
         
-        for name, checkbox in self.folder_checkboxes.items():
+        for _name, checkbox in self.folder_checkboxes.items():
             checkbox.setChecked(True)
         
         if hasattr(self, 'custom_folders'):
@@ -3193,7 +3416,7 @@ class WizardDialog(QDialog):
             <p>左侧 <b>“新建项目文件夹”</b>：按规则创建新的 S/M 项目根目录。</p>
             <p>选中项目后的 <b>“新建文件夹内部结构”</b>：在项目内创建版本目录（如 <code>V01</code>）
             及 BOM / SCH / 物料 / 评审 / 信号测试 等标准子文件夹。</p>
-            <p><b>检查更新：</b>菜单 <b>帮助 → 检查更新</b>。若程序目录可写且新版本提供 SHA-256 digest，可直接“下载并更新”；程序会退出、替换原 EXE 并重新启动。自签名版本仍可能显示“未知发布者”。</p><p>替换使用唯一临时文件；若安装和回滚都失败，旧程序 `.old` 备份和已下载的新 EXE 都会保留。</p>
+            <p><b>检查更新：</b>菜单 <b>帮助 → 检查更新</b>。程序会自动使用环境代理和 Windows 系统代理/PAC；若程序目录可写且新版本提供 SHA-256 digest，可直接“下载并更新”；程序会退出、替换原 EXE 并重新启动。自签名版本仍可能显示“未知发布者”。</p><p>替换使用唯一临时文件；若安装和回滚都失败，旧程序 `.old` 备份和已下载的新 EXE 都会保留。</p>
             <p>更详细的说明请见菜单 <b>帮助 → 使用帮助</b>。祝使用愉快！</p>
             '''
         ),
@@ -3283,6 +3506,7 @@ class MainWindow(QMainWindow):
         # 加载配置/注释期间累积的警告，待 UI 就绪后统一弹出（此时主窗口尚未构建，不能直接弹框）
         self._pending_load_warnings = []
         self._comments_load_failed = False
+        self._settings_load_failed = False
 
         self.current_folder = None
         self.filtered_folders = {'主板': [], '子卡': []}
@@ -3537,7 +3761,6 @@ class MainWindow(QMainWindow):
         """
         geo = getattr(self, 'window_geometry', None)
         maximized = bool(getattr(self, 'window_maximized', False))
-        geo_applied = False
         try:
             if isinstance(geo, (list, tuple)) and len(geo) == 4:
                 x, y, w, h = (int(v) for v in geo)
@@ -3550,7 +3773,6 @@ class MainWindow(QMainWindow):
                     visible = screen_rect.intersected(rect)
                     if visible.width() >= 100 and visible.height() >= 100:
                         self.setGeometry(rect)
-                        geo_applied = True
         except (TypeError, ValueError):
             pass
         # 几何非法但要求最大化：保持当前默认几何（来自 initUI 的 setGeometry(100,100,1400,900)），
@@ -3670,6 +3892,9 @@ class MainWindow(QMainWindow):
         pictures = get_special_folder(CSIDL_MYPICTURES)
         if pictures and os.path.exists(pictures):
             default_paths.append(('图片', pictures, False))
+        downloads = get_special_folder(CSIDL_DOWNLOADS)
+        if downloads and os.path.exists(downloads):
+            default_paths.append(('下载', downloads, False))
         
         for letter in ['C', 'D', 'E']:
             drive_path = f'{letter}:\\'
@@ -3680,6 +3905,7 @@ class MainWindow(QMainWindow):
 
     def load_settings(self):
         self._init_default_settings()
+        self._settings_load_failed = False
         if not os.path.exists(self.CONFIG_FILE):
             return self.project_paths
         try:
@@ -3688,6 +3914,7 @@ class MainWindow(QMainWindow):
         except (json.JSONDecodeError, ValueError):
             # 配置损坏：备份后用默认值，并提示用户，避免静默丢失全部配置
             bak = self._backup_corrupt_file(self.CONFIG_FILE)
+            self._settings_load_failed = bak is None
             self._pending_load_warnings.append(
                 '配置文件已损坏，已恢复默认设置' + (f'（原文件备份为 {os.path.basename(bak)}）' if bak else ''))
             self._init_default_settings()
@@ -3695,6 +3922,7 @@ class MainWindow(QMainWindow):
         except Exception:
             # 读取阶段 IO 异常（文件被占用/权限不足等）：提示用户，避免误以为配置已加载，
             # 也避免后续保存静默覆盖原配置而毫无预警
+            self._settings_load_failed = True
             self._pending_load_warnings.append('配置文件读取失败，本次会话使用默认设置')
             return self.project_paths
         try:
@@ -3758,11 +3986,13 @@ class MainWindow(QMainWindow):
                 self.window_maximized = _coerce_bool(config_data['window_maximized'])
             if 'last_project_path' in config_data:
                 self.last_project_path = _normalize_persisted_path(config_data['last_project_path']) or None
+            self._settings_load_failed = False
         except Exception:
             # 配置语义损坏（JSON 语法合法但值类型非法等）：与语法损坏同路径处理——
             # 备份原文件并提示，避免静默全量重置后下次保存覆盖丢失全部配置
             self._init_default_settings()
             bak = self._backup_corrupt_file(self.CONFIG_FILE)
+            self._settings_load_failed = bak is None
             self._pending_load_warnings.append(
                 '配置文件格式异常，已恢复默认设置' + (f'（原文件备份为 {os.path.basename(bak)}）' if bak else ''))
         return self.project_paths
@@ -3784,7 +4014,7 @@ class MainWindow(QMainWindow):
             os.makedirs(directory, exist_ok=True)
             if os.path.exists(file_path):
                 try:
-                    os.chmod(file_path, 0o666)
+                    os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
                     if sys.platform == 'win32':
                         ctypes.windll.kernel32.SetFileAttributesW(file_path, 0x80)
                 except Exception:
@@ -3817,6 +4047,9 @@ class MainWindow(QMainWindow):
         return True
 
     def save_settings_to_file(self, paths, include_subfolders=False, default_new_project_folder=None):
+        if getattr(self, '_settings_load_failed', False):
+            QMessageBox.warning(self, '警告', '配置文件读取或备份失败，已阻止自动覆盖原文件。请检查文件权限或占用情况后重启程序。')
+            return False
         try:
             normalized_paths = _normalize_named_paths(paths)
             self.quick_access_paths = _normalize_quick_access_paths(getattr(self, 'quick_access_paths', []))
@@ -3905,7 +4138,7 @@ class MainWindow(QMainWindow):
             bak = self._backup_corrupt_file(self.COMMENTS_FILE)
             self._pending_load_warnings.append(
                 '注释文件已损坏，已忽略' + (f'并备份为 {os.path.basename(bak)}' if bak else ''))
-            self._comments_load_failed = False
+            self._comments_load_failed = bak is None
             return {}
         except Exception:
             self._comments_load_failed = True
@@ -4071,13 +4304,13 @@ class MainWindow(QMainWindow):
                         return
                     t.start()
                 btn.clicked.connect(_on_single_click)
-                def _on_double_click(event, p=path, t=_single_shot, state=_click_state):
+                def _on_double_click(event, p=path, t=_single_shot, state=_click_state, button=btn):
                     state['suppress_single'] = True
                     # 取消即将触发的单击动作
                     if t.isActive():
                         t.stop()
                     self._open_with_shell(p)
-                    QPushButton.mouseDoubleClickEvent(btn, event)
+                    button.mouseDoubleClickEvent(event)
                 btn.mouseDoubleClickEvent = _on_double_click
 
             layout.insertWidget(insert_index, btn)
@@ -4274,7 +4507,7 @@ class MainWindow(QMainWindow):
             seen_arcnames.add(folder_arcname)
             zf.writestr(folder_arcname, '')
         for root, dirs, files in os.walk(source_path):
-            dirs[:] = [name for name in dirs if _path_identity(os.path.join(root, name)) not in excluded_keys]
+            dirs[:] = [name for name in dirs if not _is_reparse_point(os.path.join(root, name)) and _path_identity(os.path.join(root, name)) not in excluded_keys]
             for dir_name in dirs:
                 dir_path = os.path.join(root, dir_name)
                 dir_arcname = os.path.relpath(dir_path, base_dir).replace('\\', '/') + '/'
@@ -4283,6 +4516,8 @@ class MainWindow(QMainWindow):
                     zf.writestr(dir_arcname, '')
             for file_name in files:
                 file_path = os.path.join(root, file_name)
+                if _is_reparse_point(file_path):
+                    continue
                 if _path_identity(file_path) in excluded_keys:
                     continue
                 arcname = os.path.relpath(file_path, base_dir).replace('\\', '/')
@@ -5180,7 +5415,7 @@ class MainWindow(QMainWindow):
             return (d.lower(), d)
         results = sorted(results, key=lambda it: (dir_key(it)[0], it[0].lower()))
         cur_group = None
-        for name, rel, full, size, mtime in results:
+        for name, rel, full, size, _mtime in results:
             dpart = os.path.dirname(rel)
             if dpart != cur_group:
                 cur_group = dpart
@@ -5392,7 +5627,6 @@ class MainWindow(QMainWindow):
 
             multi_selected = len(selected_paths) > 1
             file_path = selected_paths[0]
-            file_info = self.file_model.fileInfo(index)
             ext = os.path.splitext(file_path)[1].lower()
             is_archive = ext in ['.zip', '.rar', '.7z']
 
@@ -5547,7 +5781,7 @@ class MainWindow(QMainWindow):
             dest = os.path.join(target_dir, new_name)
             counter += 1
             if counter > 100000:
-                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件")
+                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件") from None
 
         if os.path.isdir(source_path):
             shutil.copytree(source_path, dest)
@@ -5561,7 +5795,7 @@ class MainWindow(QMainWindow):
                 dest = os.path.join(target_dir, f'{base_name_without_copy}_副本{counter}{ext}')
                 counter += 1
                 if counter > 100000:
-                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件")
+                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件") from None
 
 
     def save_file_version(self, file_path):
@@ -5644,7 +5878,7 @@ class MainWindow(QMainWindow):
             
             self._reset_preview()
             os.rename(file_path, new_path)
-            self.statusBar().showMessage(f'已保存版本: {new_name}')
+            self.statusBar().showMessage(f'已重命名: {old_name} -> {new_name}')
 
             settings_changed = False
             old_comment = _get_path_mapping_value(self.comments, file_path)
@@ -5962,17 +6196,30 @@ class MainWindow(QMainWindow):
                     continue
                 target_dir = os.path.join(parent_dir, 'old')
                 os.makedirs(target_dir, exist_ok=True)
-                dest = os.path.join(target_dir, os.path.basename(file_path))
-                # 重名时追加数字
-                if os.path.exists(dest):
-                    base, ext = os.path.splitext(os.path.basename(file_path))
-                    i = 1
-                    while os.path.exists(os.path.join(target_dir, f'{base}_{i}{ext}')):
-                        i += 1
-                        if i > 100000:  # 安全上限，避免极端情况无限循环
-                            raise Exception(f'无法生成唯一的归档文件名（已尝试 {i} 次），请清理 old/ 目录')
-                    dest = os.path.join(target_dir, f'{base}_{i}{ext}')
-                shutil.move(file_path, dest)
+                source_name = os.path.basename(file_path)
+                is_directory = os.path.isdir(file_path)
+                if is_directory:
+                    base, ext = source_name, ''
+                else:
+                    base, ext = os.path.splitext(source_name)
+                moved_path = None
+                for index in range(0, 100001):
+                    if index == 0:
+                        candidate = os.path.join(target_dir, source_name)
+                    else:
+                        candidate = os.path.join(target_dir, f'{base}_{index}{ext}')
+                    if os.path.lexists(candidate):
+                        continue
+                    try:
+                        os.rename(file_path, candidate)
+                        moved_path = candidate
+                        break
+                    except OSError as error:
+                        if isinstance(error, FileExistsError) or getattr(error, 'winerror', None) in (80, 183):
+                            continue
+                        raise
+                if moved_path is None:
+                    raise Exception('无法生成唯一的归档文件名（已尝试 100001 次），请清理 old/ 目录') from None
                 moved += 1
             if moved:
                 self.statusBar().showMessage(f'已归档 {moved} 个项目到 old/')
@@ -6957,7 +7204,7 @@ class MainWindow(QMainWindow):
             elif isinstance(payload, urllib.error.URLError):
                 self._ask_open_release_page(
                     '检查更新失败',
-                    f'无法连接 GitHub。\n原因：{payload.reason}\n\n发布页：{GITHUB_RELEASES_URL}',
+                    f'无法连接 GitHub（已尝试环境代理和 Windows 系统代理/PAC）。\n原因：{payload.reason}\n\n发布页：{GITHUB_RELEASES_URL}',
                     GITHUB_RELEASES_URL,
                 )
             elif isinstance(payload, RuntimeError):
@@ -7067,7 +7314,7 @@ class MainWindow(QMainWindow):
         except urllib.error.URLError as e:
             self._ask_open_release_page(
                 '检查更新失败',
-                f'无法连接 GitHub。\n原因：{e.reason}\n\n发布页：{GITHUB_RELEASES_URL}',
+                f'无法连接 GitHub（已尝试环境代理和 Windows 系统代理/PAC）。\n原因：{e.reason}\n\n发布页：{GITHUB_RELEASES_URL}',
                 GITHUB_RELEASES_URL,
             )
         except RuntimeError as e:
@@ -7088,8 +7335,8 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>0.6.4 同步完善程序内外的安全、更新与文件操作说明；'
-            '并保留 0.6.3 的无覆盖写入、ZIP 去重、更新回滚、正则风险检测和稳定性加固。</p>'
+            '<p>0.6.5 增加 Windows 系统代理/PAC 支持，并加固配置备份、junction 扫描与 old/ 归档；'
+            '并保留此前的无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
         )
@@ -7147,6 +7394,7 @@ class MainWindow(QMainWindow):
 <h3 style="color: #2980b9;">二、检查更新与下载更新</h3>
 <ul>
 <li>点击 <b>帮助 → 检查更新</b>，程序会读取 GitHub Releases 上的最新版本并与当前版本比较。</li>
+<li>检查更新和下载会使用 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>，并解析 Windows 系统代理、PAC/WPAD；网络地址只接受 HTTP/HTTPS。</li>
 <li>发现新版本时，若程序目录可写且发布资产提供 SHA-256 digest，可选择 <b>下载并更新</b>：程序退出后由新 EXE 等待旧进程结束、替换原 EXE 并重新启动；失败时保留 <code>.old</code> 备份。</li>
 <li>若程序目录不可写（例如 Program Files）或发布资产没有 digest，只能选择 <b>仅下载</b> 后手动替换。</li>
 <li>程序内下载会在后台进行，进度窗口显示下载量、速度和预计剩余时间；网络中断时会自动重试，已有临时文件时会尽量断点续传。</li>
@@ -7311,7 +7559,7 @@ class MainWindow(QMainWindow):
 <li><b>项目注释</b>：手动编辑的注释保存到 <code>seavo_comments.json</code></li>
 <li><b>保存位置</b>：开发运行时保存在脚本所在目录；打包为 exe 后保存在 exe 所在目录</li>
 <li><b>隐藏属性</b>：在 Windows 下配置文件会尽量设置为隐藏，避免误删</li>
-<li><b>写入保护</b>：JSON 使用随机独占临时文件原子替换；注释文件读取失败时会阻止自动保存覆盖原文件</li>
+<li><b>写入保护</b>：JSON 使用随机独占临时文件原子替换；配置或注释读取、备份失败时会阻止自动保存覆盖原文件</li>
 </ul>
 
 <h3 style="color: #2980b9;">十三、常见问题</h3>
@@ -7700,10 +7948,9 @@ def _replace_executable(target, source, retries=5):
             try:
                 os.replace(backup_path, target)
             except OSError as rollback_error:
-                return False, ('替换失败，且回滚失败； %s; 旧程序保留在： %s; 新程序保留在： %s') % (
-                    install_error, backup_path, new_path,
+                return False, ('替换失败，且回滚失败；安装错误：%s；回滚错误：%s；旧程序保留在：%s；新程序保留在：%s') % (
+                    install_error, rollback_error, backup_path, new_path,
                 )
-            last_error = str(install_error)
             try:
                 os.remove(new_path)
             except OSError:

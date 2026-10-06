@@ -1138,13 +1138,26 @@ def _input_hashes():
 
 
 def _write_json_atomic(path, data):
-    directory = os.path.dirname(path)
+    directory = os.path.dirname(path) or '.'
     os.makedirs(directory, exist_ok=True)
-    temporary = path + '.tmp'
-    with open(temporary, 'w', encoding='utf-8', newline='\n') as stream:
-        json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True)
-        stream.write('\n')
-    os.replace(temporary, path)
+    fd, temporary = tempfile.mkstemp(
+        prefix='.' + os.path.basename(path) + '.', suffix='.tmp', dir=directory
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = ''
+    finally:
+        if temporary:
+            try:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            except OSError:
+                pass
 
 
 def _directory_payload_records(directory, excluded_paths):

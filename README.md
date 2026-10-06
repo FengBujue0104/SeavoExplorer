@@ -1,8 +1,8 @@
 # SeavoExplorer 主板项目文件浏览器
 
-**版本 0.6.4**
+**版本 0.6.5**
 
-Windows 单文件版可从 [v0.6.4 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.4) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
+Windows 单文件版可从 [v0.6.5 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.5) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
 
 ---
 
@@ -61,6 +61,14 @@ SeavoExplorer 是一个 Windows 桌面工具，用于浏览以 S/M 编号命名�
 - 旧配置会在正常保存时自动迁移为统一路径格式
 - PDF、Excel、Word 和视频预览完成后会释放读取资源；重命名、归档或移入回收站前会清理当前预览，避免文件被 SeavoExplorer 占用
 - 「项目文件夹设置」默认窗口更大，路径表格至少显示四行
+
+#### 🆕 0.6.5 网络与安全修复
+
+- 更新检查和下载统一使用系统和环境代理，支持 `HTTP_PROXY`/`HTTPS_PROXY`、Windows 系统代理及 PAC/WPAD；网络地址只接受 HTTP/HTTPS。
+- 配置或注释文件读取/备份失败时阻止自动保存覆盖原文件。
+- 项目扫描、统计、搜索和 ZIP 打包跳过 Windows junction/reparse point，避免目录循环和越界扫描。
+- `old/` 归档改用无覆盖原子移动，目标重名时追加序号，不覆盖已有文件。
+- 构建 manifest 改用随机独占临时文件并执行 flush/fsync。
 
 #### 🆕 0.6.4 文档更新
 
@@ -211,7 +219,7 @@ python -m venv .venv-build
 .\.venv-build\Scripts\python.exe -m pip install -r requirements-build.txt
 ```
 
-两个包装器都使用同一个权威配置 `main.spec`，默认离线执行版本/资源检查、Python 3.8 grammar、`py_compile`、125 项回归测试、PyInstaller 构建、二进制来源审计和净化环境下的隔离启动冒烟；不会自动安装依赖或重生成图标。
+两个包装器都使用同一个权威配置 `main.spec`，默认离线执行版本/资源检查、Python 3.8 grammar、`py_compile`、131 项回归测试、PyInstaller 构建、二进制来源审计和净化环境下的隔离启动冒烟；不会自动安装依赖或重生成图标。
 
 ### 单文件 exe
 
@@ -255,7 +263,7 @@ python -m py_compile main.py test_safety.py test_tooling.py build_support.py bui
 git diff --check
 ```
 
-当前共 125 项 unittest：`test_safety.py` 的 95 项覆盖产品安全关键路径，`test_tooling.py` 的 30 项覆盖版本/哈希、严格构建环境、manifest、本地资产快照、onedir 完整遍历、环境净化、二进制来源、代码签名及 GitHub 发布状态校验；它们不等同于完整 GUI 人工验收。
+当前共 131 项 unittest：`test_safety.py` 的 101 项覆盖产品安全关键路径，`test_tooling.py` 的 30 项覆盖版本/哈希、严格构建环境、manifest、本地资产快照、onedir 完整遍历、环境净化、二进制来源、代码签名及 GitHub 发布状态校验；它们不等同于完整 GUI 人工验收。
 
 ---
 
