@@ -438,7 +438,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.5'
+APP_VERSION = '0.6.6'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -1791,10 +1791,14 @@ def _free_windows_proxy_pointer(kernel32, pointer):
             pass
 
 
-def _get_windows_proxy_for_url(url):
-    """Resolve the current Windows user proxy, including PAC/WPAD if available."""
-    if sys.platform != 'win32':
-        return {}
+_WINHTTP_CTYPES = None
+
+
+def _winhttp_ctypes():
+    """Return cached WinHTTP ctypes structures matching the Windows SDK ABI."""
+    global _WINHTTP_CTYPES
+    if _WINHTTP_CTYPES is not None:
+        return _WINHTTP_CTYPES
     from ctypes import wintypes
 
     class WINHTTP_CURRENT_USER_IE_PROXY_CONFIG(ctypes.Structure):
@@ -1810,8 +1814,7 @@ def _get_windows_proxy_for_url(url):
             ('dwFlags', wintypes.DWORD),
             ('dwAutoDetectFlags', wintypes.DWORD),
             ('lpszAutoConfigUrl', wintypes.LPCWSTR),
-            ('lpszProxy', wintypes.LPWSTR),
-            ('lpszProxyBypass', wintypes.LPWSTR),
+            ('fAutoLogonIfChallenged', wintypes.BOOL),
             ('dwReserved', wintypes.DWORD),
         ]
 
@@ -1821,6 +1824,42 @@ def _get_windows_proxy_for_url(url):
             ('lpszProxy', ctypes.c_void_p),
             ('lpszProxyBypass', ctypes.c_void_p),
         ]
+
+    _WINHTTP_CTYPES = (
+        WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
+        WINHTTP_AUTOPROXY_OPTIONS,
+        WINHTTP_PROXY_INFO,
+    )
+    return _WINHTTP_CTYPES
+
+
+def _fill_winhttp_autoproxy_options(options, auto_url):
+    """Fill PAC/WPAD options. dwReserved must remain 0."""
+    auto_url = str(auto_url or '')
+    if auto_url:
+        options.dwFlags = 0x00000002  # WINHTTP_AUTOPROXY_CONFIG_URL
+        options.lpszAutoConfigUrl = auto_url
+        options.dwAutoDetectFlags = 0
+    else:
+        options.dwFlags = 0x00000001  # WINHTTP_AUTOPROXY_AUTO_DETECT
+        options.dwAutoDetectFlags = 0x00000001 | 0x00000002  # DHCP + DNS/WPAD
+        options.lpszAutoConfigUrl = None
+    options.fAutoLogonIfChallenged = True
+    options.dwReserved = 0
+    return options
+
+
+def _get_windows_proxy_for_url(url):
+    """Resolve the current Windows user proxy, including PAC/WPAD if available."""
+    if sys.platform != 'win32':
+        return {}
+    from ctypes import wintypes
+
+    (
+        WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
+        WINHTTP_AUTOPROXY_OPTIONS,
+        WINHTTP_PROXY_INFO,
+    ) = _winhttp_ctypes()
 
     winhttp = ctypes.windll.winhttp
     kernel32 = ctypes.windll.kernel32
@@ -1840,7 +1879,6 @@ def _get_windows_proxy_for_url(url):
     try:
         auto_url = _proxy_wstring(config.lpszAutoConfigUrl)
         config_proxy = _proxy_wstring(config.lpszProxy)
-        config_bypass = _proxy_wstring(config.lpszProxyBypass)
         if auto_url or config.fAutoDetect:
             session = winhttp.WinHttpOpen(
                 'SeavoExplorer/%s' % APP_VERSION,
@@ -1851,14 +1889,7 @@ def _get_windows_proxy_for_url(url):
             )
             if session:
                 options = WINHTTP_AUTOPROXY_OPTIONS()
-                if auto_url:
-                    options.dwFlags = 0x00000002  # WINHTTP_AUTOPROXY_CONFIG_URL
-                    options.lpszAutoConfigUrl = auto_url
-                else:
-                    options.dwFlags = 0x00000001  # WINHTTP_AUTOPROXY_AUTO_DETECT
-                    options.dwAutoDetectFlags = 0x00000001 | 0x00000002  # DHCP + DNS/WPAD
-                options.lpszProxy = config_proxy
-                options.lpszProxyBypass = config_bypass
+                _fill_winhttp_autoproxy_options(options, auto_url)
                 info = WINHTTP_PROXY_INFO()
                 try:
                     if winhttp.WinHttpGetProxyForUrl(
@@ -7335,8 +7366,8 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>0.6.5 增加 Windows 系统代理/PAC 支持，并加固配置备份、junction 扫描与 old/ 归档；'
-            '并保留此前的无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
+            '<p>0.6.6 修正 Windows PAC/WPAD 选项结构体，确保系统代理解析按 WinHTTP ABI 传递；'
+            '并保留此前的系统代理/PAC 支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
         )

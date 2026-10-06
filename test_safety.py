@@ -1,5 +1,6 @@
 import ast
 import base64
+import ctypes
 import json
 import os
 import re
@@ -278,6 +279,85 @@ class ProxySupportTests(unittest.TestCase):
                 main._urlopen_with_proxy(request, timeout=5)
         build.assert_called_once()
         opener.open.assert_called_once_with(request, timeout=5)
+
+    def test_winhttp_autoproxy_options_matches_windows_abi(self):
+        from ctypes import wintypes
+
+        _ie_cls, options_cls, info_cls = main._winhttp_ctypes()
+        self.assertEqual(
+            [name for name, _typ in options_cls._fields_],
+            [
+                'dwFlags',
+                'dwAutoDetectFlags',
+                'lpszAutoConfigUrl',
+                'fAutoLogonIfChallenged',
+                'dwReserved',
+            ],
+        )
+        fields = dict(options_cls._fields_)
+        self.assertIs(fields['fAutoLogonIfChallenged'], wintypes.BOOL)
+        self.assertIs(fields['dwReserved'], wintypes.DWORD)
+        self.assertEqual(
+            [name for name, _typ in info_cls._fields_],
+            ['dwAccessType', 'lpszProxy', 'lpszProxyBypass'],
+        )
+        if ctypes.sizeof(ctypes.c_void_p) == 8:
+            self.assertEqual(ctypes.sizeof(options_cls), 24)
+            self.assertEqual(options_cls.fAutoLogonIfChallenged.offset, 16)
+            self.assertEqual(options_cls.dwReserved.offset, 20)
+
+    def test_winhttp_autoproxy_options_keep_reserved_zero(self):
+        _ie_cls, options_cls, _info_cls = main._winhttp_ctypes()
+        pac = main._fill_winhttp_autoproxy_options(options_cls(), 'http://proxy.example/wpad.dat')
+        self.assertEqual(pac.dwFlags, 0x00000002)
+        self.assertEqual(pac.lpszAutoConfigUrl, 'http://proxy.example/wpad.dat')
+        self.assertEqual(pac.dwAutoDetectFlags, 0)
+        self.assertEqual(pac.dwReserved, 0)
+        self.assertTrue(pac.fAutoLogonIfChallenged)
+        detect = main._fill_winhttp_autoproxy_options(options_cls(), '')
+        self.assertEqual(detect.dwFlags, 0x00000001)
+        self.assertEqual(detect.dwAutoDetectFlags, 0x00000003)
+        self.assertEqual(detect.dwReserved, 0)
+        self.assertTrue(detect.fAutoLogonIfChallenged)
+
+    def test_get_windows_proxy_passes_sdk_pac_options(self):
+        if sys.platform != 'win32':
+            self.skipTest('WinHTTP is Windows-only')
+        ie_cls, options_cls, _info_cls = main._winhttp_ctypes()
+        captured = {}
+
+        def fake_ie(ptr):
+            config = ctypes.cast(ptr, ctypes.POINTER(ie_cls)).contents
+            config.fAutoDetect = 1
+            return 1
+
+        def fake_get_proxy(session, url, options_ptr, info_ptr):
+            options = ctypes.cast(options_ptr, ctypes.POINTER(options_cls)).contents
+            captured['names'] = [name for name, _typ in type(options)._fields_]
+            captured['dwFlags'] = int(options.dwFlags)
+            captured['dwAutoDetectFlags'] = int(options.dwAutoDetectFlags)
+            captured['dwReserved'] = int(options.dwReserved)
+            captured['fAutoLogonIfChallenged'] = bool(options.fAutoLogonIfChallenged)
+            captured['size'] = ctypes.sizeof(type(options))
+            return 0
+
+        fake_winhttp = mock.Mock()
+        fake_winhttp.WinHttpGetIEProxyConfigForCurrentUser.side_effect = fake_ie
+        fake_winhttp.WinHttpOpen.return_value = 11
+        fake_winhttp.WinHttpGetProxyForUrl.side_effect = fake_get_proxy
+        fake_winhttp.WinHttpCloseHandle.return_value = 1
+        fake_kernel32 = mock.Mock()
+        fake_windll = SimpleNamespace(winhttp=fake_winhttp, kernel32=fake_kernel32)
+        with mock.patch.object(main.ctypes, 'windll', fake_windll):
+            result = main._get_windows_proxy_for_url('https://example.invalid/update')
+        self.assertEqual(result, {})
+        self.assertEqual(captured['names'][3], 'fAutoLogonIfChallenged')
+        self.assertEqual(captured['dwFlags'], 0x00000001)
+        self.assertEqual(captured['dwAutoDetectFlags'], 0x00000003)
+        self.assertEqual(captured['dwReserved'], 0)
+        self.assertTrue(captured['fAutoLogonIfChallenged'])
+        if ctypes.sizeof(ctypes.c_void_p) == 8:
+            self.assertEqual(captured['size'], 24)
 
 
 class SaveFileVersionTests(unittest.TestCase):
