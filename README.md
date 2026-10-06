@@ -273,11 +273,17 @@ python -m venv .venv-build
 
 ```powershell
 python -m unittest -q test_safety.py test_tooling.py
-python -m py_compile main.py test_safety.py test_tooling.py build_support.py build_onefile.py build_onedir.py make_ico.py release.py
+python -m py_compile main.py test_safety.py test_tooling.py gui_smoke.py build_support.py build_onefile.py build_onedir.py make_ico.py release.py
 git diff --check
 ```
 
 当前共 150 项 unittest：`test_safety.py` 的 120 项覆盖产品安全关键路径，`test_tooling.py` 的 30 项覆盖版本/哈希、严格构建环境、manifest、本地资产快照、onedir 完整遍历、环境净化、二进制来源、代码签名及 GitHub 发布状态校验；它们不等同于完整 GUI 人工验收。
+
+可选的真实窗口冒烟不在上述 150 项里，也不会随构建/发布自动运行：
+
+```powershell
+python gui_smoke.py
+```
 
 ---
 
