@@ -29,7 +29,7 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 | 路径 | 职责与注意事项 |
 | --- | --- |
 | `main.py` | 应用入口和全部主要产品逻辑；运行行为的首要事实来源。 |
-| `test_safety.py` | 120 项产品安全/回归测试；会导入 PyQt5，但使用临时数据，不应接触真实项目。 |
+| `test_safety.py` | 126 项产品安全/回归测试；会导入 PyQt5，但使用临时数据，不应接触真实项目。 |
 | `test_tooling.py` | 30 项无网络辅助链路测试：版本、哈希、严格环境、manifest、快照、完整遍历、环境净化、tag/draft/assets。 |
 | `gui_smoke.py` | 可选真实窗口冒烟：占用分析、复制路径、撤回。使用隔离 sidecar 与临时项目，不读真实配置。不是 unittest，不纳入发布门禁；不要在默认验证或 `release.py` 中运行。 |
 | `requirements.txt` | Python >=3.8 源码运行依赖范围，不含 PyInstaller。 |
@@ -145,7 +145,7 @@ git diff --check
 git status --short
 ```
 
-当前 150 项测试中，120 项产品测试覆盖版本/裸 `except`、默认路径、终端、回收站、7-Zip 授权、手动预览、路径规范化、预览资源释放、外部剪贴板粘贴、面包屑双击、保存版本后缀递增、更新 `.part`、事务式解压、正则结构安全、文本编码/BOM、zip 去重、folder_structure 归一化、失效根目录错误信号、old/ 守卫、PAC/WinHTTP 结构体、占用分析/资源管理器选中、撤回和文档一致性；30 项 tooling tests 覆盖构建/发布、代码签名和 manifest 的 fail-closed 契约。它们不是完整 GUI/所有文件格式的端到端测试，报告时必须区分。需要真实窗口时再手动运行 `python gui_smoke.py`；默认 unittest 和正式发布都不要跑它。
+当前 156 项测试中，126 项产品测试覆盖版本/裸 `except`、默认路径、终端、回收站、7-Zip 授权、手动预览、路径规范化、预览资源释放、外部剪贴板粘贴、面包屑双击、保存版本后缀递增、更新 `.part`、事务式解压、正则结构安全、文本编码/BOM、zip 去重、folder_structure 归一化、失效根目录错误信号、old/ 守卫、PAC/WinHTTP 结构体、占用分析/资源管理器选中、撤回和文档一致性；30 项 tooling tests 覆盖构建/发布、代码签名和 manifest 的 fail-closed 契约。它们不是完整 GUI/所有文件格式的端到端测试，报告时必须区分。需要真实窗口时再手动运行 `python gui_smoke.py`；默认 unittest 和正式发布都不要跑它。
 
 正式 onefile 验证必须使用由 `requirements-build.txt` 创建、未启用 system-site-packages，且除 venv 自带 pip/wheel 外无锁外包的 Python 3.13.2 x64 venv：
 

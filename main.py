@@ -742,6 +742,11 @@ def _apply_undo_rename(current, original):
     return original
 
 
+def _undo_retryable_path(current, original):
+    """A failed rename/move can be retried only while that item still exists."""
+    return bool(current and original and os.path.lexists(current))
+
+
 def _apply_undo_create_paths(paths, recycle_fn):
     """Send created files to recycle_fn. Fail closed: leftover files stay on disk."""
     successes = []
@@ -5166,15 +5171,17 @@ class MainWindow(QMainWindow):
         record = stack.pop()
         self._undo_stack = stack
         try:
-            ok = self._apply_undo_record(record)
+            ok, retry = self._apply_undo_record(record)
         except Exception as error:
             stack.append(record)
             self._undo_stack = stack
             self._refresh_undo_action()
             QMessageBox.warning(self, '撤回失败', str(error))
             return False
+        if retry:
+            self._push_undo(retry)
         self._refresh_undo_action()
-        return ok
+        return bool(ok)
 
     def _apply_undo_record(self, record):
         kind = record.get('kind')
@@ -5188,22 +5195,34 @@ class MainWindow(QMainWindow):
             possible, reason = _undo_rename_possible(current, original)
             if not possible:
                 QMessageBox.warning(self, '无法撤回', '无法撤回%s：%s' % (label, reason))
-                return False
+                retry = None
+                if _undo_retryable_path(current, original):
+                    retry = _make_undo_rename(current, original, label)
+                return False, retry
             _apply_undo_rename(current, original)
             retarget = getattr(self, '_retarget_persisted_path', None)
             if callable(retarget):
                 retarget(current, original)
             self.statusBar().showMessage('已撤回%s: %s' % (label, os.path.basename(original)))
-            return True
+            return True, None
         if kind == 'move':
             done = 0
             errors = []
+            retry_pairs = []
             for original, current in record.get('pairs') or []:
                 possible, reason = _undo_rename_possible(current, original)
                 if not possible:
                     errors.append((current or original, reason))
+                    if _undo_retryable_path(current, original):
+                        retry_pairs.append((original, current))
                     continue
-                os.rename(current, original)
+                try:
+                    os.rename(current, original)
+                except OSError as error:
+                    errors.append((current or original, str(error)))
+                    if _undo_retryable_path(current, original):
+                        retry_pairs.append((original, current))
+                    continue
                 done += 1
             if done:
                 self.statusBar().showMessage('已撤回%s: %d 项' % (label, done))
@@ -5217,7 +5236,8 @@ class MainWindow(QMainWindow):
                     '部分撤回失败' if done else '无法撤回',
                     details,
                 )
-            return done > 0
+            retry = _make_undo_move(retry_pairs, label) if retry_pairs else None
+            return done > 0, retry
         if kind == 'create':
             backend = _load_strict_recycle_backend()
 
@@ -5239,9 +5259,14 @@ class MainWindow(QMainWindow):
                     '部分撤回失败' if successes else '无法撤回',
                     details,
                 )
-            return bool(successes)
+            retry_paths = [
+                path for path, _message in errors
+                if path and os.path.lexists(path)
+            ]
+            retry = _make_undo_create(retry_paths, label) if retry_paths else None
+            return bool(successes), retry
         QMessageBox.warning(self, '无法撤回', '不支持撤回该操作')
-        return False
+        return False, None
 
     def copy_selected_items(self):
         selected_paths = self._get_selected_file_paths()
@@ -8266,7 +8291,7 @@ class MainWindow(QMainWindow):
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
-<li><b>撤回（Ctrl+Z）</b>：撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。撤回创建类操作会把新文件移入回收站，不会永久删除；原位置被占用时拒绝覆盖。移入回收站本身请到系统回收站还原</li>
+<li><b>撤回（Ctrl+Z）</b>：撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。撤回创建类操作会把新文件移入回收站，不会永久删除；原位置被占用时拒绝覆盖，未完成的撤回会保留并可再次尝试。移入回收站本身请到系统回收站还原</li>
 <li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并始终定位到所选路径</li>
 <li><b>在资源管理器中显示</b>：打开资源管理器并选中该文件/文件夹（不是只打开所在目录）</li>
 <li><b>复制完整路径 / 复制相对路径</b>：复制为纯文本，便于粘贴到聊天或文档；不会改写“粘贴副本”用的文件剪贴板</li>

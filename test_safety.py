@@ -1721,6 +1721,9 @@ class UndoActionTests(unittest.TestCase):
             with open(current, 'w', encoding='utf-8') as stream:
                 stream.write('new')
             window = self._window()
+            bottom_current = os.path.join(root, 'bottom-current.txt')
+            bottom_original = os.path.join(root, 'bottom-original.txt')
+            window._push_undo(main._make_undo_rename(bottom_current, bottom_original, '底层'))
             window._push_undo(main._make_undo_rename(current, original, '重命名'))
             with mock.patch.object(main.QMessageBox, 'warning') as warning:
                 ok = window.undo_last_action()
@@ -1729,7 +1732,27 @@ class UndoActionTests(unittest.TestCase):
             self.assertTrue(os.path.exists(current))
             self.assertEqual(read_text(original), 'keep')
             self.assertEqual(read_text(current), 'new')
+            self.assertEqual(len(window._undo_stack), 2)
+            self.assertEqual(window._undo_stack[0]['current'], bottom_current)
+            self.assertEqual(window._undo_stack[1]['current'], current)
+            self.assertEqual(window._undo_stack[1]['original'], original)
             warning.assert_called_once()
+            with mock.patch.object(main.QMessageBox, 'warning') as warning_again:
+                ok_again = window.undo_last_action()
+            self.assertFalse(ok_again)
+            self.assertEqual(len(window._undo_stack), 2)
+            self.assertEqual(read_text(original), 'keep')
+            self.assertEqual(read_text(current), 'new')
+            warning_again.assert_called_once()
+            os.remove(original)
+            with mock.patch.object(main.QMessageBox, 'warning') as warning_final:
+                ok_final = window.undo_last_action()
+            self.assertTrue(ok_final)
+            self.assertFalse(os.path.exists(current))
+            self.assertEqual(read_text(original), 'new')
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertEqual(window._undo_stack[0]['current'], bottom_current)
+            warning_final.assert_not_called()
 
     def test_undo_create_uses_recycle_backend(self):
         with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
@@ -1750,6 +1773,7 @@ class UndoActionTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(recycled, [created])
             self.assertFalse(os.path.exists(created))
+            self.assertEqual(window._undo_stack, [])
             warning.assert_not_called()
 
     def test_undo_create_keeps_file_when_recycle_fails(self):
@@ -1769,7 +1793,18 @@ class UndoActionTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertTrue(os.path.exists(created))
             self.assertEqual(read_text(created), 'keep-me')
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertEqual(window._undo_stack[0]['kind'], 'create')
+            self.assertEqual(window._undo_stack[0]['paths'], [created])
             warning.assert_called_once()
+            with mock.patch.object(main, '_load_strict_recycle_backend', return_value=fake_backend):
+                with mock.patch.object(main.QMessageBox, 'warning') as warning_again:
+                    ok_again = window.undo_last_action()
+            self.assertFalse(ok_again)
+            self.assertTrue(os.path.exists(created))
+            self.assertEqual(read_text(created), 'keep-me')
+            self.assertEqual(len(window._undo_stack), 1)
+            warning_again.assert_called_once()
 
     def test_undo_archive_moves_file_back(self):
         with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
@@ -1790,6 +1825,7 @@ class UndoActionTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertTrue(os.path.exists(path))
             self.assertFalse(os.path.exists(archived))
+            self.assertEqual(window._undo_stack, [])
             warning.assert_not_called()
 
     def test_undo_archive_refuses_when_original_occupied(self):
@@ -1808,6 +1844,160 @@ class UndoActionTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(read_text(original), 'keep')
             self.assertEqual(read_text(current), 'archived')
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertEqual(window._undo_stack[0]['kind'], 'move')
+            self.assertEqual(window._undo_stack[0]['pairs'], [(original, current)])
+            warning.assert_called_once()
+            os.remove(original)
+            with mock.patch.object(main.QMessageBox, 'warning') as warning_again:
+                ok_again = window.undo_last_action()
+            self.assertTrue(ok_again)
+            self.assertEqual(read_text(original), 'archived')
+            self.assertFalse(os.path.exists(current))
+            self.assertEqual(window._undo_stack, [])
+            warning_again.assert_not_called()
+
+    def test_undo_move_retries_only_occupied_pair(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            free_original = os.path.join(root, 'free.txt')
+            free_current = os.path.join(root, 'free-moved.txt')
+            busy_original = os.path.join(root, 'busy.txt')
+            busy_current = os.path.join(root, 'busy-moved.txt')
+            with open(free_current, 'w', encoding='utf-8') as stream:
+                stream.write('free')
+            with open(busy_original, 'w', encoding='utf-8') as stream:
+                stream.write('keep')
+            with open(busy_current, 'w', encoding='utf-8') as stream:
+                stream.write('moved')
+            window = self._window()
+            window._push_undo(main._make_undo_move([
+                (free_original, free_current),
+                (busy_original, busy_current),
+            ], '归档到 old/'))
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                ok = window.undo_last_action()
+            self.assertTrue(ok)
+            self.assertEqual(read_text(free_original), 'free')
+            self.assertFalse(os.path.exists(free_current))
+            self.assertEqual(read_text(busy_original), 'keep')
+            self.assertEqual(read_text(busy_current), 'moved')
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertEqual(window._undo_stack[0]['kind'], 'move')
+            self.assertEqual(window._undo_stack[0]['pairs'], [(busy_original, busy_current)])
+            warning.assert_called_once()
+
+    def test_undo_create_retries_only_locked_path(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            gone = os.path.join(root, 'gone.txt')
+            locked = os.path.join(root, 'locked.txt')
+            with open(gone, 'w', encoding='utf-8') as stream:
+                stream.write('gone')
+            with open(locked, 'w', encoding='utf-8') as stream:
+                stream.write('keep')
+
+            def fake_backend(path):
+                if os.path.basename(path) == 'locked.txt':
+                    raise OSError('locked')
+                os.remove(path)
+
+            window = self._window()
+            window._push_undo(main._make_undo_create([gone, locked], '粘贴副本'))
+            with mock.patch.object(main, '_load_strict_recycle_backend', return_value=fake_backend):
+                with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                    ok = window.undo_last_action()
+            self.assertTrue(ok)
+            self.assertFalse(os.path.exists(gone))
+            self.assertEqual(read_text(locked), 'keep')
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertEqual(window._undo_stack[0]['kind'], 'create')
+            self.assertEqual(window._undo_stack[0]['paths'], [locked])
+            warning.assert_called_once()
+
+    def test_undo_move_retries_only_pair_whose_rename_raises(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            good_original = os.path.join(root, 'good-orig.txt')
+            good_current = os.path.join(root, 'good.txt')
+            bad_original = os.path.join(root, 'bad-orig.txt')
+            bad_current = os.path.join(root, 'bad.txt')
+            with open(good_current, 'w', encoding='utf-8') as stream:
+                stream.write('good')
+            with open(bad_current, 'w', encoding='utf-8') as stream:
+                stream.write('bad')
+            window = self._window()
+            window._push_undo(main._make_undo_move([
+                (bad_original, bad_current),
+                (good_original, good_current),
+            ], '移动'))
+            real_rename = os.rename
+
+            def selective(src, dst):
+                if os.path.basename(src) == 'bad.txt':
+                    raise OSError('denied')
+                return real_rename(src, dst)
+
+            with mock.patch.object(main.os, 'rename', side_effect=selective):
+                with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                    ok = window.undo_last_action()
+            self.assertTrue(ok)
+            self.assertEqual(read_text(good_original), 'good')
+            self.assertFalse(os.path.exists(good_current))
+            self.assertEqual(read_text(bad_current), 'bad')
+            self.assertFalse(os.path.exists(bad_original))
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertEqual(window._undo_stack[0]['pairs'], [(bad_original, bad_current)])
+            warning.assert_called_once()
+
+    def test_undo_rename_drops_record_when_target_missing(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            original = os.path.join(root, 'a.txt')
+            current = os.path.join(root, 'b.txt')
+            window = self._window()
+            window._push_undo(main._make_undo_rename(current, original, '重命名'))
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                ok = window.undo_last_action()
+            self.assertFalse(ok)
+            self.assertEqual(window._undo_stack, [])
+            warning.assert_called_once()
+
+    def test_undo_rename_drops_record_when_original_missing(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            current = os.path.join(root, 'b.txt')
+            with open(current, 'w', encoding='utf-8') as stream:
+                stream.write('stay')
+            window = self._window()
+            window._undo_stack = [{
+                'kind': 'rename',
+                'current': current,
+                'original': '',
+                'label': '重命名',
+            }]
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                ok = window.undo_last_action()
+            self.assertFalse(ok)
+            self.assertEqual(read_text(current), 'stay')
+            self.assertEqual(window._undo_stack, [])
+            warning.assert_called_once()
+
+    def test_undo_create_does_not_retry_missing_path(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            missing = os.path.join(root, 'missing.txt')
+            locked = os.path.join(root, 'locked.txt')
+            with open(locked, 'w', encoding='utf-8') as stream:
+                stream.write('keep')
+
+            def fake_backend(path):
+                raise OSError('locked')
+
+            window = self._window()
+            window._push_undo(main._make_undo_create([missing, locked], '粘贴副本'))
+            with mock.patch.object(main, '_load_strict_recycle_backend', return_value=fake_backend):
+                with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                    ok = window.undo_last_action()
+            self.assertFalse(ok)
+            self.assertFalse(os.path.exists(missing))
+            self.assertEqual(read_text(locked), 'keep')
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertEqual(window._undo_stack[0]['paths'], [locked])
             warning.assert_called_once()
 
     def test_undo_empty_stack_does_not_raise(self):
