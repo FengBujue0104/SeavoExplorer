@@ -191,5 +191,7 @@ git status --short
 - 已发布 v0.6.7 EXE 为 96,991,520 bytes，SHA-256：`4F543B0ECEC704B2ED5506BB1FD6BD6A7341CA4DACD6B6EC80FD978EEDB3DBB9`；使用自签名证书，远端三资产 digest 已核对。本版增加占用分析、资源管理器选中/复制路径，以及 Ctrl+Z 撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。
 - annotated tag `v0.6.8`（tag object `51d8fbb257a86d6b1c764dee34bd23090bf40815`）指向 `4732d35318fe1d6811ece551c8a885b2d17b0cfa`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.8
 - 已发布 v0.6.8 EXE 为 96,992,320 bytes，SHA-256：`0026FEAEC339C1BB020755B065938C00C213CA696A853D54C210342120F5E7C5`；使用自签名证书，远端三资产 digest 已核对。本版修复撤回未完成时记录被丢弃的问题，仍存在的项可以再次撤回。
+- annotated tag `v0.6.9`（tag object `068bb0d337bd17dff2dcd65dd8552eb0e06f2493`）指向 `70d839626b638135277cc9d53543ec558d441fea`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.9
+- 已发布 v0.6.9 EXE 为 96,995,432 bytes，SHA-256：`191B03E41EA88BBB73113361F1331476F589E59C0B8F712D766258CB162A941F`；使用自签名证书，远端三资产 digest 已核对。本版在文件与设置之间增加编辑菜单，路径复制只保留在编辑菜单，快捷键只显示在项名后面。
 
 交付时明确报告修改文件、实际执行的检查、构建产物哈希和未执行事项；不要把“语法可解析”表述成“GUI 功能已验证”。
