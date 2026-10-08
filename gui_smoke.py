@@ -197,18 +197,39 @@ def run_smoke(shot_dir=None, real_explorer=False):
             else:
                 ok('main window title')
 
-            file_texts = [
-                action.text()
-                for action in window.menuBar().actions()[0].menu().actions()
-            ]
+            menus = window.menuBar().actions()
+            menu_titles = [action.text() for action in menus]
+            if menu_titles[:4] != [u'文件', u'编辑', u'设置', u'帮助']:
+                fail('menu order is %s' % menu_titles)
+            else:
+                ok('edit menu between file and settings')
+            file_actions = menus[0].menu().actions()
+            file_texts = [action.text() for action in file_actions]
             if u'占用分析' not in file_texts:
                 fail('file menu missing occupancy: %s' % file_texts)
             else:
                 ok('file menu has occupancy')
-            if not any(text.startswith(u'撤回') for text in file_texts):
-                fail('file menu missing undo: %s' % file_texts)
+            if any(text.startswith(u'撤回') for text in file_texts):
+                fail('undo still in file menu: %s' % file_texts)
             else:
-                ok('file menu has undo')
+                ok('undo moved out of file menu')
+            refresh_actions = [action for action in file_actions if action.text() == u'刷新']
+            if len(refresh_actions) != 1 or refresh_actions[0].shortcut().toString() != 'F5':
+                fail('refresh shortcut is %s' % [
+                    (action.text(), action.shortcut().toString()) for action in file_actions
+                ])
+            else:
+                ok('refresh shortcut is F5')
+            edit_actions = menus[1].menu().actions()
+            edit_texts = [action.text() for action in edit_actions]
+            if any(u'快捷键' in text for text in file_texts + edit_texts):
+                fail('verbose shortcut label: %s' % (file_texts + edit_texts))
+            else:
+                ok('menu shortcuts are keys only')
+            if not any(text.startswith(u'撤回') for text in edit_texts):
+                fail('edit menu missing undo: %s' % edit_texts)
+            else:
+                ok('edit menu has undo')
             if window.undo_action.shortcut() != QKeySequence.Undo:
                 fail('undo shortcut is %r' % window.undo_action.shortcut().toString())
             else:
@@ -217,6 +238,29 @@ def run_smoke(shot_dir=None, real_explorer=False):
                 fail('undo enabled at startup')
             else:
                 ok('undo disabled at startup')
+            edit_by_text = {}
+            for action in edit_actions:
+                edit_by_text.setdefault(action.text(), action)
+            expected_shortcuts = (
+                (u'复制', 'Ctrl+C'),
+                (u'粘贴副本', 'Ctrl+V'),
+                (u'重命名', 'F2'),
+                (u'移入回收站', ('Del', 'Delete')),
+            )
+            for label, shortcut in expected_shortcuts:
+                action = edit_by_text.get(label)
+                shown = action.shortcut().toString() if action is not None else None
+                allowed = shortcut if isinstance(shortcut, tuple) else (shortcut,)
+                if action is None or shown not in allowed:
+                    fail('edit shortcut %s is %s' % (label, shown))
+                else:
+                    ok('edit shortcut %s' % label)
+            for label in (u'复制完整路径', u'复制相对路径'):
+                action = edit_by_text.get(label)
+                if action is None or not action.shortcut().isEmpty():
+                    fail('path copy action missing or has shortcut: %s' % label)
+                else:
+                    ok('edit menu has %s' % label)
 
             if not pump_until(lambda: window.motherboard_table.rowCount() >= 1, timeout=15):
                 fail('scan did not find motherboard project')

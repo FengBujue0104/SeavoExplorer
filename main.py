@@ -4316,9 +4316,69 @@ class MainWindow(QMainWindow):
         file_menu.addAction('新建项目', self.new_project)
         file_menu.addAction('新建文件夹内部结构', self.new_folder_structure)
         file_menu.addAction('占用分析', self.show_occupancy_analysis)
-        file_menu.addAction(self.undo_action)
-        file_menu.addAction('刷新(快捷键F5)', self.refresh_all)
+        self.refresh_action = QAction('刷新', self)
+        self.refresh_action.setShortcut(QKeySequence(Qt.Key_F5))
+        self.refresh_action.triggered.connect(self.refresh_all)
+        file_menu.addAction(self.refresh_action)
         file_menu.addAction('退出', self.close)
+        edit_menu = menubar.addMenu('编辑')
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addSeparator()
+        self.edit_copy_action = QAction('复制', self)
+        self.edit_copy_action.setShortcut(QKeySequence.Copy)
+        self.edit_copy_full_action = QAction('复制完整路径', self)
+        self.edit_copy_rel_action = QAction('复制相对路径', self)
+        self.edit_reveal_action = QAction('在资源管理器中显示', self)
+        self.edit_zip_action = QAction('添加到zip压缩包', self)
+        self.edit_paste_action = QAction('粘贴副本', self)
+        self.edit_paste_action.setShortcut(QKeySequence.Paste)
+        self.edit_rename_action = QAction('重命名', self)
+        self.edit_rename_action.setShortcut(QKeySequence(Qt.Key_F2))
+        self.edit_save_version_action = QAction('保存版本', self)
+        self.edit_terminal_action = QAction('在终端中打开', self)
+        self.edit_extract_action = QAction('智能解压', self)
+        self.edit_archive_action = QAction('归档到old文件夹', self)
+        self.edit_recycle_action = QAction('移入回收站', self)
+        self.edit_recycle_action.setShortcut(QKeySequence(Qt.Key_Delete))
+        edit_entries = (
+            self.edit_copy_action,
+            self.edit_copy_full_action,
+            self.edit_copy_rel_action,
+            self.edit_reveal_action,
+            self.edit_zip_action,
+            self.edit_paste_action,
+            self.edit_rename_action,
+            self.edit_save_version_action,
+            self.edit_terminal_action,
+            None,
+            self.edit_extract_action,
+            None,
+            self.edit_archive_action,
+            self.edit_recycle_action,
+        )
+        edit_slots = {
+            self.edit_copy_action: self._edit_copy_files,
+            self.edit_copy_full_action: self._edit_copy_full_paths,
+            self.edit_copy_rel_action: self._edit_copy_relative_paths,
+            self.edit_reveal_action: self._edit_reveal_files,
+            self.edit_zip_action: self._edit_add_to_zip,
+            self.edit_paste_action: self._edit_paste_copy,
+            self.edit_rename_action: self._edit_rename,
+            self.edit_save_version_action: self._edit_save_version,
+            self.edit_terminal_action: self._edit_open_terminal,
+            self.edit_extract_action: self._edit_smart_extract,
+            self.edit_archive_action: self._edit_archive_to_old,
+            self.edit_recycle_action: self._edit_move_to_recycle,
+        }
+        for action in edit_entries:
+            if action is None:
+                edit_menu.addSeparator()
+                continue
+            action.setEnabled(False)
+            action.triggered.connect(edit_slots[action])
+            edit_menu.addAction(action)
+        edit_menu.aboutToShow.connect(self._update_edit_menu_state)
+        edit_menu.aboutToHide.connect(self._disable_edit_menu_actions)
         settings_menu = menubar.addMenu('设置')
         settings_menu.addAction('项目文件夹设置', self.show_settings_dialog)
         settings_menu.addAction('快捷访问设置', self.show_quick_access_settings_dialog)
@@ -4334,7 +4394,142 @@ class MainWindow(QMainWindow):
         help_menu.addAction('使用帮助', self.show_help)
         help_menu.addAction('检查更新', self.check_for_updates)
         help_menu.addAction('关于', self.show_about)
-    
+
+    def _edit_actions(self):
+        return (
+            self.edit_copy_action,
+            self.edit_copy_full_action,
+            self.edit_copy_rel_action,
+            self.edit_reveal_action,
+            self.edit_zip_action,
+            self.edit_paste_action,
+            self.edit_rename_action,
+            self.edit_save_version_action,
+            self.edit_terminal_action,
+            self.edit_extract_action,
+            self.edit_archive_action,
+            self.edit_recycle_action,
+        )
+
+    def _update_edit_menu_state(self):
+        selected_paths = self._get_selected_file_paths()
+        count = len(selected_paths)
+        single = count == 1
+        file_path = selected_paths[0] if single else ''
+        is_dir = bool(file_path) and os.path.isdir(file_path)
+        ext = os.path.splitext(file_path)[1].lower() if file_path else ''
+        current_folder = getattr(self, 'current_folder', None)
+        has_folder = bool(current_folder) and os.path.exists(current_folder)
+        can_paste = self._has_pasteable_clipboard() and (single or (count == 0 and has_folder))
+        enabled = {
+            self.edit_copy_action: count > 0,
+            self.edit_copy_full_action: count > 0,
+            self.edit_copy_rel_action: count > 0,
+            self.edit_reveal_action: count > 0,
+            self.edit_zip_action: count > 0,
+            self.edit_paste_action: can_paste,
+            self.edit_rename_action: single,
+            self.edit_save_version_action: single,
+            self.edit_terminal_action: single and is_dir,
+            self.edit_extract_action: single and ext in ARCHIVE_EXTS,
+            self.edit_archive_action: count > 0,
+            self.edit_recycle_action: count > 0,
+        }
+        for action, is_enabled in enabled.items():
+            action.setEnabled(is_enabled)
+        for name in ('copy_shortcut', 'paste_shortcut'):
+            shortcut = getattr(self, name, None)
+            if shortcut is not None:
+                shortcut.setEnabled(False)
+
+    def _disable_edit_menu_actions(self):
+        for action in self._edit_actions():
+            action.setEnabled(False)
+        for name in ('copy_shortcut', 'paste_shortcut'):
+            shortcut = getattr(self, name, None)
+            if shortcut is not None:
+                shortcut.setEnabled(True)
+
+    def _edit_copy_files(self):
+        selected_paths = self._get_selected_file_paths()
+        if selected_paths:
+            self._copy_paths_to_clipboard(selected_paths)
+
+    def _edit_copy_full_paths(self):
+        selected_paths = self._get_selected_file_paths()
+        if selected_paths:
+            self._copy_path_texts_to_clipboard(selected_paths, '完整路径')
+
+    def _edit_copy_relative_paths(self):
+        selected_paths = self._get_selected_file_paths()
+        if not selected_paths:
+            return
+        rels = [
+            _relative_path_for_display(self.current_folder, item_path)
+            for item_path in selected_paths
+        ]
+        self._copy_path_texts_to_clipboard(rels, '相对路径')
+
+    def _edit_reveal_files(self):
+        selected_paths = self._get_selected_file_paths()
+        if selected_paths:
+            self._reveal_paths_in_explorer(selected_paths)
+
+    def _edit_add_to_zip(self):
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) > 1:
+            self.add_paths_to_zip(selected_paths)
+        elif len(selected_paths) == 1:
+            self.add_to_zip(selected_paths[0])
+
+    def _edit_paste_copy(self):
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) > 1:
+            return
+        if len(selected_paths) == 1:
+            self.paste_copy(selected_paths[0])
+            return
+        if self.current_folder and os.path.exists(self.current_folder):
+            self.paste_copy(self.current_folder)
+        else:
+            QMessageBox.warning(self, "警告", "请先选择一个项目文件夹")
+
+    def _edit_rename(self):
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) == 1:
+            self.rename_item(selected_paths[0])
+        elif len(selected_paths) > 1:
+            self.statusBar().showMessage("请选择单个文件或文件夹进行重命名")
+
+    def _edit_save_version(self):
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) == 1:
+            self.save_file_version(selected_paths[0])
+
+    def _edit_open_terminal(self):
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) == 1 and os.path.isdir(selected_paths[0]):
+            self.open_folder_in_terminal(selected_paths[0])
+
+    def _edit_smart_extract(self):
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) != 1:
+            return
+        if os.path.splitext(selected_paths[0])[1].lower() in ARCHIVE_EXTS:
+            self.smart_extract(selected_paths[0])
+
+    def _edit_archive_to_old(self):
+        selected_paths = self._get_selected_file_paths()
+        if selected_paths:
+            self.archive_to_old_folder(selected_paths)
+
+    def _edit_move_to_recycle(self):
+        selected_paths = self._get_selected_file_paths()
+        if len(selected_paths) > 1:
+            self._move_paths_to_recycle(selected_paths)
+        elif len(selected_paths) == 1:
+            self.move_to_recycle(selected_paths[0])
+
     def _on_toggle_show_hidden(self, checked):
         self.show_hidden = checked
         self.save_settings_to_file(self.settings, self.include_subfolders)
@@ -6469,8 +6664,6 @@ class MainWindow(QMainWindow):
             is_archive = ext in ['.zip', '.rar', '.7z']
 
             copy_action = menu.addAction('复制')
-            copy_full_action = menu.addAction('复制完整路径')
-            copy_rel_action = menu.addAction('复制相对路径')
             reveal_action = menu.addAction('在资源管理器中显示')
             add_to_zip_action = menu.addAction('添加到zip压缩包')
 
@@ -6501,36 +6694,25 @@ class MainWindow(QMainWindow):
             action = menu.exec_(self.file_tree.viewport().mapToGlobal(position))
 
             if action == copy_action:
-                self._copy_paths_to_clipboard(selected_paths)
-            elif action == copy_full_action:
-                self._copy_path_texts_to_clipboard(selected_paths, '完整路径')
-            elif action == copy_rel_action:
-                rels = [_relative_path_for_display(self.current_folder, item_path) for item_path in selected_paths]
-                self._copy_path_texts_to_clipboard(rels, '相对路径')
+                self._edit_copy_files()
             elif action == reveal_action:
-                self._reveal_paths_in_explorer(selected_paths)
+                self._edit_reveal_files()
             elif action == add_to_zip_action:
-                if multi_selected:
-                    self.add_paths_to_zip(selected_paths)
-                else:
-                    self.add_to_zip(file_path)
+                self._edit_add_to_zip()
             elif not multi_selected and action == paste_copy_action:
-                self.paste_copy(file_path)
+                self._edit_paste_copy()
             elif not multi_selected and action == rename_action:
-                self.rename_item(file_path)
+                self._edit_rename()
             elif not multi_selected and action == save_version_action:
-                self.save_file_version(file_path)
+                self._edit_save_version()
             elif not multi_selected and terminal_action and action == terminal_action:
-                self.open_folder_in_terminal(file_path)
+                self._edit_open_terminal()
             elif not multi_selected and extract_action and action == extract_action:
-                self.smart_extract(file_path)
+                self._edit_smart_extract()
             elif action == recycle_action:
-                if multi_selected:
-                    self._move_paths_to_recycle(selected_paths)
-                else:
-                    self.move_to_recycle(file_path)
+                self._edit_move_to_recycle()
             elif action == archive_action:
-                self.archive_to_old_folder(selected_paths)
+                self._edit_archive_to_old()
         else:
             # 右键点击了空白区域
             paste_copy_action = menu.addAction('粘贴副本')
@@ -6539,11 +6721,7 @@ class MainWindow(QMainWindow):
             action = menu.exec_(self.file_tree.viewport().mapToGlobal(position))
 
             if action == paste_copy_action:
-                # 粘贴到当前文件夹
-                if self.current_folder and os.path.exists(self.current_folder):
-                    self.paste_copy(self.current_folder)
-                else:
-                    QMessageBox.warning(self, "警告", "请先选择一个项目文件夹")
+                self._edit_paste_copy()
     
     def _has_pasteable_clipboard(self):
         """剪贴板中是否有可粘贴的有效路径"""
@@ -8280,6 +8458,8 @@ class MainWindow(QMainWindow):
 <p>文件树支持多选：按住 <b>Ctrl</b> 点选多个项目，或按住 <b>Shift</b> 选择连续范围。多选后可批量复制、删除、压缩。</p>
 
 <p><b>3. 右键菜单</b></p>
+<p>文件树右键菜单中的操作都放在菜单 <b>编辑</b> 里，<b>撤回</b>也从文件菜单移到了编辑菜单。有快捷键的项只在名称后面显示按键，格式与 <b>撤回</b>、<b>刷新</b> 相同（例如 Ctrl+C、F2、Delete）。右键菜单不标注快捷键。</p>
+<p><b>复制完整路径</b>和<b>复制相对路径</b>只保留在编辑菜单。</p>
 <p>选中<b>单个</b>文件/文件夹时：</p>
 <ul>
 <li><b>复制</b>：复制到剪贴板，既可在资源管理器中粘贴，也可用程序内"粘贴副本"</li>
@@ -8291,12 +8471,12 @@ class MainWindow(QMainWindow):
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
-<li><b>撤回（Ctrl+Z）</b>：撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。撤回创建类操作会把新文件移入回收站，不会永久删除；原位置被占用时拒绝覆盖，未完成的撤回会保留并可再次尝试。移入回收站本身请到系统回收站还原</li>
+<li><b>撤回</b>：位于菜单 <b>编辑</b>，快捷键显示在名称后面（Ctrl+Z）。撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。撤回创建类操作会把新文件移入回收站，不会永久删除；原位置被占用时拒绝覆盖，未完成的撤回会保留并可再次尝试。移入回收站本身请到系统回收站还原</li>
 <li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并始终定位到所选路径</li>
 <li><b>在资源管理器中显示</b>：打开资源管理器并选中该文件/文件夹（不是只打开所在目录）</li>
-<li><b>复制完整路径 / 复制相对路径</b>：复制为纯文本，便于粘贴到聊天或文档；不会改写“粘贴副本”用的文件剪贴板</li>
+<li><b>复制完整路径 / 复制相对路径</b>：只在菜单 <b>编辑</b> 中，右键菜单不再显示。复制为纯文本，便于粘贴到聊天或文档；不会改写“粘贴副本”用的文件剪贴板。多选时以换行拼接</li>
 </ul>
-<p>选中<b>多个</b>项目时，菜单仅保留可批量执行的项：<b>复制</b>、<b>复制完整路径</b>、<b>复制相对路径</b>、<b>在资源管理器中显示</b>、<b>添加到zip压缩包</b>、<b>归档到old文件夹</b>、<b>移入回收站</b>。多选复制路径时以换行拼接；显示时定位第一项。</p>
+<p>选中<b>多个</b>项目时，右键菜单仅保留可批量执行的项：<b>复制</b>、<b>在资源管理器中显示</b>、<b>添加到zip压缩包</b>、<b>归档到old文件夹</b>、<b>移入回收站</b>。编辑菜单中的复制完整路径、复制相对路径同样支持多选，以换行拼接；在资源管理器中显示时定位第一项。</p>
 <p>在<b>空白处</b>右键：仅显示<b>粘贴副本</b>，粘贴到当前项目文件夹。</p>
 
 <p><b>4. 复制与粘贴的目标规则</b></p>
@@ -8399,6 +8579,7 @@ class MainWindow(QMainWindow):
 <tr><td>← ↑</td><td>视频帧查看器:切换到上一帧</td></tr>
 <tr><td>→ ↓</td><td>视频帧查看器:切换到下一帧</td></tr>
 </table>
+<p>文件菜单的刷新，以及编辑菜单的撤回、复制、粘贴副本、重命名、移入回收站，会在名称后面显示对应按键。右键菜单不重复标注。</p>
 
 <h3 style="color: #2980b9;">十二、配置文件与数据保存</h3>
 <ul>

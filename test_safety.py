@@ -2325,5 +2325,57 @@ class UpdateModeTests(unittest.TestCase):
         self.assertIn('源码', reason)
 
 
+class EditMenuTests(unittest.TestCase):
+    def _source(self):
+        return read_text(os.path.abspath(main.__file__))
+
+    def _function(self, name):
+        source = self._source()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                segment = ast.get_source_segment(source, node)
+                self.assertIsNotNone(segment)
+                return segment
+        self.fail(name)
+
+    def test_edit_menu_sits_between_file_and_settings(self):
+        create = self._function("create_menu")
+        labels = re.findall(r"addMenu\('([^']+)'\)", create)
+        self.assertEqual(labels, ["文件", "编辑", "设置", "帮助"])
+        file_part, rest = create.split("addMenu('编辑')", 1)
+        edit_part, _settings = rest.split("addMenu('设置')", 1)
+        self.assertNotIn("undo_action", file_part)
+        self.assertNotIn("快捷键", create)
+        self.assertIn("self.undo_action", edit_part)
+        self.assertIn("QAction('刷新', self)", create)
+        self.assertIn("QKeySequence(Qt.Key_F5)", create)
+        self.assertIn("QAction('复制', self)", create)
+        self.assertIn("QKeySequence.Copy", create)
+        self.assertIn("QAction('复制完整路径', self)", create)
+        self.assertIn("QAction('复制相对路径', self)", create)
+        self.assertIn("QKeySequence.Paste", create)
+        self.assertIn("QKeySequence(Qt.Key_F2)", create)
+        self.assertIn("QKeySequence(Qt.Key_Delete)", create)
+
+    def test_file_tree_context_menu_drops_path_copy_labels(self):
+        menu = self._function("on_file_tree_context_menu")
+        self.assertNotIn("复制完整路径", menu)
+        self.assertNotIn("复制相对路径", menu)
+        self.assertNotIn("setShortcut", menu)
+        self.assertNotIn("快捷键", menu)
+        self.assertIn("menu.addAction('复制')", menu)
+        folder_menu = self._function("_show_folder_context_menu")
+        self.assertIn("复制路径", folder_menu)
+
+    def test_help_and_readme_point_path_copy_at_edit_menu(self):
+        source = self._source()
+        self.assertIn("只在菜单 <b>编辑</b> 中，右键菜单不再显示", source)
+        self.assertNotIn("<b>复制</b>、<b>复制完整路径</b>、<b>复制相对路径</b>", source)
+        self.assertNotIn("快捷键F5", source)
+        readme = read_text(os.path.join(os.path.dirname(os.path.abspath(main.__file__)), "README.md"))
+        self.assertIn("复制完整路径、相对路径在菜单「编辑」中", readme)
+        self.assertIn("入口在菜单「编辑」", readme)
+
 if __name__ == '__main__':
     unittest.main()
