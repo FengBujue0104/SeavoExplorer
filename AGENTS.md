@@ -18,7 +18,7 @@
 
 SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以 S/M 编号命名的硬件/PCB 项目目录。界面、业务和平台集成集中在约 7,648 行的 `main.py`。
 
-- 当前版本为 0.6.8；运行时版本的首要来源是 `main.py` 的 `APP_VERSION`。
+- 当前版本为 0.6.9；运行时版本的首要来源是 `main.py` 的 `APP_VERSION`。
 - 源码保持 Python 3.8 grammar 兼容；官方 Windows EXE 已验证环境为 Python 3.13.2 x64。
 - UI、用户提示和主要文档使用中文，文本统一 UTF-8。
 - Windows 是实际目标平台，代码使用 `os.startfile`、Windows Shell/`ctypes`、强制回收站接口和固定的 7-Zip 安装位置。

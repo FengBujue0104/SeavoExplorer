@@ -1,8 +1,8 @@
 # SeavoExplorer 主板项目文件浏览器
 
-**版本 0.6.8**
+**版本 0.6.9**
 
-Windows 单文件版可从 [v0.6.8 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.8) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
+Windows 单文件版可从 [v0.6.9 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.9) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
 
 ---
 
@@ -64,6 +64,12 @@ SeavoExplorer 是一个 Windows 桌面工具，用于浏览以 S/M 编号命名�
 - 旧配置会在正常保存时自动迁移为统一路径格式
 - PDF、Excel、Word 和视频预览完成后会释放读取资源；重命名、归档或移入回收站前会清理当前预览，避免文件被 SeavoExplorer 占用
 - 「项目文件夹设置」默认窗口更大，路径表格至少显示四行
+
+#### 🆕 0.6.9 编辑菜单
+
+- 在「文件」和「设置」之间新增「编辑」菜单，收入文件树右键中的操作，并把「撤回」从文件菜单移入编辑。
+- 复制完整路径、复制相对路径只保留在编辑菜单，右键菜单不再显示这两项。
+- 有快捷键的菜单项只在名称后面显示按键（如 F5、Ctrl+Z），右键菜单不标注。
 
 #### 🆕 0.6.8 撤回失败可重试
 

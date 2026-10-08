@@ -439,7 +439,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.8'
+APP_VERSION = '0.6.9'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -8356,8 +8356,8 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>0.6.8 修复撤回未完成时记录被丢弃的问题：原路径被占用、回收站失败或只完成一部分时，仍存在的项可以再次撤回；目标已不存在时不再重试。0.6.7 增加占用分析、资源管理器选中/复制路径，以及 Ctrl+Z 撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/；'
-            '并保留此前的 PAC/系统代理支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
+            '<p>0.6.9 在「文件」和「设置」之间增加「编辑」菜单，文件树右键操作和撤回都放在这里；复制完整路径、复制相对路径只保留在编辑菜单。有快捷键的项只在名称后面显示按键。0.6.8 修复撤回未完成时可重试；'
+            '并保留此前的占用分析、资源管理器选中、PAC/系统代理支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
         )
