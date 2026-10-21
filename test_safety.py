@@ -15,6 +15,8 @@ import zipfile
 from types import SimpleNamespace
 from unittest import mock
 
+from PyQt5.QtGui import QMouseEvent
+
 import main
 
 
@@ -513,6 +515,170 @@ class BreadcrumbNavigationTests(unittest.TestCase):
             )
             main.MainWindow._on_breadcrumb_double_clicked(window, outside)
             opened.assert_not_called()
+
+
+class QuickAccessDoubleClickTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = main.QApplication.instance() or main.QApplication([])
+
+    def _create_buttons(self, parent, items):
+        layout = main.QHBoxLayout(parent)
+        add_button = main.QPushButton('+')
+        layout.addWidget(add_button)
+        stub = SimpleNamespace(
+            quick_access_buttons=[],
+            quick_access_paths=items,
+            quick_access_add_btn=add_button,
+            _show_quick_access_context_menu=mock.Mock(),
+            _open_quick_access_external=mock.Mock(),
+            _open_quick_access_path=mock.Mock(),
+            _open_with_shell=mock.Mock(),
+        )
+        main.MainWindow._create_quick_access_buttons(stub, layout)
+        return stub
+
+    @staticmethod
+    def _double_click_event(widget):
+        return QMouseEvent(
+            main.QEvent.MouseButtonDblClick,
+            widget.rect().center(),
+            main.Qt.LeftButton,
+            main.Qt.LeftButton,
+            main.Qt.NoModifier,
+        )
+
+    def _pump(self, milliseconds):
+        deadline = time.monotonic() + milliseconds / 1000.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+
+    def _send(self, widget, event_type):
+        self.app.sendEvent(
+            widget,
+            QMouseEvent(
+                event_type,
+                widget.rect().center(),
+                main.Qt.LeftButton,
+                main.Qt.LeftButton,
+                main.Qt.NoModifier,
+            ),
+        )
+
+    def test_double_click_opens_folder_once_without_recursion(self):
+        """双击普通快捷访问按钮只外开一次，不得因实例属性 monkeypatch 自我递归（v0.6.5 回归）。"""
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            parent = main.QWidget()
+            stub = self._create_buttons(parent, [('临时项目', root, False)])
+            button = stub.quick_access_buttons[0]
+            try:
+                button.mouseDoubleClickEvent(self._double_click_event(button))
+            except RecursionError:
+                self.fail('双击快捷访问按钮触发自我递归')
+            self.assertEqual(stub._open_with_shell.call_args_list, [mock.call(root)])
+            parent.deleteLater()
+
+    def test_no_preview_double_click_opens_once(self):
+        """不预览按钮：双击只外开一次（双击事件被吞），双击后单击仍可再次打开。"""
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            parent = main.QWidget()
+            stub = self._create_buttons(parent, [('不预览', root, True)])
+            button = stub.quick_access_buttons[0]
+            external = stub._open_quick_access_external
+            self._send(button, main.QEvent.MouseButtonPress)
+            self._send(button, main.QEvent.MouseButtonRelease)
+            self.assertEqual(external.call_count, 1)
+            # 第二次按下被 Qt 标记为双击；随后的 release 不应再触发一次 clicked
+            self._send(button, main.QEvent.MouseButtonDblClick)
+            self._send(button, main.QEvent.MouseButtonRelease)
+            self.assertEqual(external.call_count, 1)
+            # 双击结束后下一次单击仍可再次打开
+            self._send(button, main.QEvent.MouseButtonPress)
+            self._send(button, main.QEvent.MouseButtonRelease)
+            self.assertEqual(external.call_count, 2)
+            parent.deleteLater()
+
+    def test_double_click_suppresses_one_clicked_even_after_long_hold(self):
+        """双击第二次 release 长按后才到达也只吞一次 clicked；release 丢失时下一次按下会清除残留。"""
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            parent = main.QWidget()
+            stub = self._create_buttons(parent, [('临时项目', root, False)])
+            button = stub.quick_access_buttons[0]
+            nav = stub._open_quick_access_path
+            event = self._double_click_event(button)
+            button.mouseDoubleClickEvent(event)
+            self.assertEqual(stub._open_with_shell.call_count, 1)
+            self._pump(700)  # 第二次 release 晚到：旧的时间窗实现会在此失效
+            button.clicked.emit(False)
+            self._pump(300)
+            self.assertEqual(nav.call_count, 0)
+            button.clicked.emit(False)
+            self._pump(300)
+            self.assertEqual(nav.call_count, 1)
+            # 第二次 release 丢失：下一次按下清除残留抑制，单击不被吞
+            button.mouseDoubleClickEvent(event)
+            button.pressed.emit()
+            button.clicked.emit(False)
+            self._pump(300)
+            self.assertEqual(nav.call_count, 2)
+            parent.deleteLater()
+
+
+class LabelClickBindingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = main.QApplication.instance() or main.QApplication([])
+
+    def test_double_click_invokes_label_press_handler_once(self):
+        """QLabel 绑定单击处理时，双击不得再额外触发一次 mousePressEvent。"""
+        label = main.QLabel('目标文件夹')
+        calls = []
+        main._bind_label_click(label, lambda event: calls.append(event.type()))
+        position = label.rect().center()
+        for event_type in (main.QEvent.MouseButtonPress, main.QEvent.MouseButtonDblClick):
+            self.app.sendEvent(
+                label,
+                QMouseEvent(
+                    event_type,
+                    position,
+                    main.Qt.LeftButton,
+                    main.Qt.LeftButton,
+                    main.Qt.NoModifier,
+                ),
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_clickable_label_double_click_emits_once(self):
+        """状态栏 _ClickableLabel：双击只发一次 clicked，下一次单击仍正常。"""
+        label = main._ClickableLabel('统计')
+        clicks = []
+        label.clicked.connect(lambda: clicks.append(1))
+        position = label.rect().center()
+
+        def send(event_type):
+            self.app.sendEvent(
+                label,
+                QMouseEvent(
+                    event_type,
+                    position,
+                    main.Qt.LeftButton,
+                    main.Qt.LeftButton,
+                    main.Qt.NoModifier,
+                ),
+            )
+
+        for event_type in (
+            main.QEvent.MouseButtonPress,
+            main.QEvent.MouseButtonRelease,
+            main.QEvent.MouseButtonDblClick,
+            main.QEvent.MouseButtonRelease,
+        ):
+            send(event_type)
+        self.assertEqual(len(clicks), 1)
+        send(main.QEvent.MouseButtonPress)
+        send(main.QEvent.MouseButtonRelease)
+        self.assertEqual(len(clicks), 2)
 
 
 class TerminalSafetyTests(unittest.TestCase):

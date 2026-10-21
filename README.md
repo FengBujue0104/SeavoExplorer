@@ -1,8 +1,8 @@
 # SeavoExplorer 主板项目文件浏览器
 
-**版本 0.6.9**
+**版本 0.6.10**
 
-Windows 单文件版可从 [v0.6.9 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.9) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
+Windows 单文件版可从 [v0.6.10 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.10) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
 
 ---
 
@@ -64,6 +64,15 @@ SeavoExplorer 是一个 Windows 桌面工具，用于浏览以 S/M 编号命名�
 - 旧配置会在正常保存时自动迁移为统一路径格式
 - PDF、Excel、Word 和视频预览完成后会释放读取资源；重命名、归档或移入回收站前会清理当前预览，避免文件被 SeavoExplorer 占用
 - 「项目文件夹设置」默认窗口更大，路径表格至少显示四行
+
+#### 🆕 0.6.10 快捷访问双击修复
+
+- 修复普通快捷访问按钮双击时因自我递归反复打开资源管理器并卡死（v0.6.5 引入的回归）。
+- 修复「不显示预览」快捷访问按钮慢速双击可能打开两次；双击现在只外开一次。
+- 修复双击第二次 release 长按或丢失时多一次文件树导航或吞掉下一次单击。
+- 修复新建项目「目标文件夹」标签、图片预览标签双击重复触发；修复状态栏占用分析入口双击重复触发。
+- 文档补充默认快捷访问项（桌面、图片、下载，以及本机存在的 C:/D:/E: 盘根目录；磁盘根目录默认不显示预览）。
+- 回归测试增至 164 项（134 项产品测试 + 30 项 tooling 测试）。
 
 #### 🆕 0.6.9 编辑菜单
 
@@ -192,6 +201,7 @@ SeavoExplorer 是一个 Windows 桌面工具，用于浏览以 S/M 编号命名�
 
 ### 7. 快捷访问栏
 
+- 默认包含桌面、图片、下载以及 C:、D:、E: 盘根目录（均按本机实际存在情况生成）；磁盘根目录默认按「不显示预览」创建
 - 可在「设置 → 快捷访问设置」中配置常用目录按钮
 - 普通快捷按钮会在程序文件树中显示目录内容
 - 「不显示预览」按钮会直接用资源管理器打开，适合磁盘根目录、网络目录等大目录
@@ -245,7 +255,7 @@ python -m venv .venv-build
 .\.venv-build\Scripts\python.exe -m pip install -r requirements-build.txt
 ```
 
-两个包装器都使用同一个权威配置 `main.spec`，默认离线执行版本/资源检查、Python 3.8 grammar、`py_compile`、156 项回归测试、PyInstaller 构建、二进制来源审计和净化环境下的隔离启动冒烟；不会自动安装依赖或重生成图标。
+两个包装器都使用同一个权威配置 `main.spec`，默认离线执行版本/资源检查、Python 3.8 grammar、`py_compile`、164 项回归测试、PyInstaller 构建、二进制来源审计和净化环境下的隔离启动冒烟；不会自动安装依赖或重生成图标。
 
 ### 单文件 exe
 
@@ -289,9 +299,9 @@ python -m py_compile main.py test_safety.py test_tooling.py gui_smoke.py build_s
 git diff --check
 ```
 
-当前共 156 项 unittest：`test_safety.py` 的 126 项覆盖产品安全关键路径，`test_tooling.py` 的 30 项覆盖版本/哈希、严格构建环境、manifest、本地资产快照、onedir 完整遍历、环境净化、二进制来源、代码签名及 GitHub 发布状态校验；它们不等同于完整 GUI 人工验收。
+当前共 164 项 unittest：`test_safety.py` 的 134 项覆盖产品安全关键路径，`test_tooling.py` 的 30 项覆盖版本/哈希、严格构建环境、manifest、本地资产快照、onedir 完整遍历、环境净化、二进制来源、代码签名及 GitHub 发布状态校验；它们不等同于完整 GUI 人工验收。
 
-可选的真实窗口冒烟不在上述 156 项里，也不会随构建/发布自动运行：
+可选的真实窗口冒烟不在上述 164 项里，也不会随构建/发布自动运行：
 
 ```powershell
 python gui_smoke.py

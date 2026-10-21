@@ -439,7 +439,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.9'
+APP_VERSION = '0.6.10'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -830,6 +830,17 @@ def _normalize_path_list(paths):
             seen.add(key)
             result.append(normalized)
     return result
+
+
+def _ignore_double_click(event):
+    """吞掉双击事件，避免 Qt 默认处理把它再转成一次 press/release。"""
+    return None
+
+
+def _bind_label_click(widget, handler):
+    """把单击处理绑定到 QLabel，并忽略双击，避免双击时同一操作被触发两次。"""
+    widget.mousePressEvent = handler
+    widget.mouseDoubleClickEvent = _ignore_double_click
 
 
 def _copy_file_exclusive(source_path, destination_path):
@@ -2775,8 +2786,23 @@ class FileSearchThread(QThread):
 
 class _ClickableLabel(QLabel):
     clicked = pyqtSignal()
+    _ignore_release = False
+
+    def mousePressEvent(self, event):
+        # 新的一次按下说明上一轮双击的 release 已结束或丢失，清除残留抑制
+        self._ignore_release = False
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击不再额外触发一次 clicked（默认实现会把双击转成 press/release）
+        self._ignore_release = True
+        event.accept()
 
     def mouseReleaseEvent(self, event):
+        if self._ignore_release:
+            self._ignore_release = False
+            event.accept()
+            return
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mouseReleaseEvent(event)
@@ -2997,7 +3023,7 @@ class NewProjectDialog(QDialog):
         self.folder_label.setStyleSheet('font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;')
         self.folder_label.setToolTip('点击更改目标文件夹')
         self.folder_label.setCursor(Qt.PointingHandCursor)
-        self.folder_label.mousePressEvent = self.select_folder
+        _bind_label_click(self.folder_label, self.select_folder)
         
         folder_btn = QPushButton('选择文件夹')
         folder_btn.clicked.connect(self.select_folder)
@@ -4203,7 +4229,7 @@ class MainWindow(QMainWindow):
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setCursor(Qt.PointingHandCursor)  # 点击手势
-        self.image_label.mousePressEvent = self.show_full_image  # 点击事件
+        _bind_label_click(self.image_label, self.show_full_image)  # 点击事件
         self.image_scroll_area.setWidget(self.image_label)
         self.preview_layout.addWidget(self.image_scroll_area)
         self.image_scroll_area.hide()  # 初始隐藏图片预览
@@ -4997,16 +5023,10 @@ class MainWindow(QMainWindow):
                     "color: #555; font-style: italic; }"
                     "QPushButton:hover { background-color: #d8d8d8; }"
                 )
-                # "不预览"按钮:无论单双击,只打开一次资源管理器
-                _opened = {'done': False}
-                def _open_external_once(p=path, _flag=_opened):
-                    if _flag['done']:
-                        return  # 已打开,忽略重复触发
-                    _flag['done'] = True
-                    self._open_quick_access_external(p)
-                    # 250ms 后重置标志,允许下次点击
-                    QTimer.singleShot(300, lambda: _flag.update(done=False))
-                btn.clicked.connect(lambda checked, fn=_open_external_once: fn())
+                # "不预览"按钮:单击直接打开资源管理器；双击事件吞掉，
+                # 避免 Qt 默认双击处理在第二次 release 再发一次 clicked 而打开两次
+                btn.mouseDoubleClickEvent = _ignore_double_click
+                btn.clicked.connect(lambda checked, p=path: self._open_quick_access_external(p))
             else:
                 _single_shot.timeout.connect(lambda p=path: self._open_quick_access_path(p))
                 # 单击启动定时器；双击时用 suppress 标志抑制第二次 release 触发的 clicked
@@ -5017,14 +5037,23 @@ class MainWindow(QMainWindow):
                         state['suppress_single'] = False
                         return
                     t.start()
+                def _on_press(state=_click_state):
+                    # 新的一次按下说明上一次双击的第二次 release 未到达，清除残留抑制
+                    state['suppress_single'] = False
                 btn.clicked.connect(_on_single_click)
+                btn.pressed.connect(_on_press)
                 def _on_double_click(event, p=path, t=_single_shot, state=_click_state, button=btn):
-                    state['suppress_single'] = True
                     # 取消即将触发的单击动作
                     if t.isActive():
                         t.stop()
                     self._open_with_shell(p)
-                    button.mouseDoubleClickEvent(event)
+                    # 必须调用 QPushButton 的类方法实现（与面包屑按钮一致）；
+                    # 写成 button.mouseDoubleClickEvent(event) 会命中下面的实例属性 monkeypatch，
+                    # 变成调用 _on_double_click 自身，造成无限自我递归（v0.6.5 回归）。
+                    QPushButton.mouseDoubleClickEvent(button, event)
+                    # 基类调用会先发出 pressed（触发 _on_press），因此在其后设置抑制；
+                    # 只吞掉本次双击第二次 release 的 clicked，与时间无关。
+                    state['suppress_single'] = True
                 btn.mouseDoubleClickEvent = _on_double_click
 
             layout.insertWidget(insert_index, btn)
@@ -6270,14 +6299,19 @@ class MainWindow(QMainWindow):
                         return
                     timer.start()
 
+                def _on_press(state=click_state):
+                    state['suppress_single'] = False
+
                 btn.clicked.connect(_on_single_click)
+                btn.pressed.connect(_on_press)
 
                 def _on_double_click(event, p=path, timer=single_shot, button=btn, state=click_state):
-                    state['suppress_single'] = True
                     if timer.isActive():
                         timer.stop()
                     self._on_breadcrumb_double_clicked(p)
                     QToolButton.mouseDoubleClickEvent(button, event)
+                    # 基类调用先发出 pressed；随后抑制本次双击第二次 release 的 clicked
+                    state['suppress_single'] = True
 
                 btn.mouseDoubleClickEvent = _on_double_click
                 self._breadcrumb_layout.insertWidget(insert_at, btn)
@@ -8356,7 +8390,7 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>0.6.9 在「文件」和「设置」之间增加「编辑」菜单，文件树右键操作和撤回都放在这里；复制完整路径、复制相对路径只保留在编辑菜单。有快捷键的项只在名称后面显示按键。0.6.8 修复撤回未完成时可重试；'
+            '<p>0.6.10 修复双击快捷访问按钮反复打开资源管理器并卡死、不预览按钮慢速双击打开两次、双击后单击偶发失效，以及标签和占用分析入口双击重复触发；文档补充默认快捷访问说明。0.6.9 在「文件」和「设置」之间增加「编辑」菜单，文件树右键操作和撤回都放在这里；复制完整路径、复制相对路径只保留在编辑菜单。有快捷键的项只在名称后面显示按键。0.6.8 修复撤回未完成时可重试；'
             '并保留此前的占用分析、资源管理器选中、PAC/系统代理支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
@@ -8530,6 +8564,7 @@ class MainWindow(QMainWindow):
 
 <h3 style="color: #2980b9;">七、快捷访问栏</h3>
 <p>菜单栏下方的快捷访问栏提供常用文件夹的快速入口：</p>
+<p>默认快捷访问包含桌面、图片、下载以及 C:、D:、E: 盘根目录（均按本机实际存在情况生成）；磁盘根目录默认按“不显示预览”创建，可在快捷访问设置中重命名、排序或删除。</p>
 <ul>
 <li><b>普通按钮</b>（默认样式）：点击后在文件树中显示该文件夹内容</li>
 <li><b>不显示预览按钮</b>（灰色斜体）：点击后直接在资源管理器中打开</li>
