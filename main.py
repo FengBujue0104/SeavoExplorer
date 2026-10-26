@@ -168,6 +168,67 @@ def _validate_windows_filename(name):
         return f'"{stem}" 是 Windows 保留名称，请更换名称'
     return None
 
+
+def _safe_structure_folder_name(name):
+    """Return a single safe folder name, or None if it could escape the version directory."""
+    if not isinstance(name, str):
+        return None
+    cleaned = name.strip()
+    if not cleaned or _validate_windows_filename(cleaned):
+        return None
+    return cleaned
+
+
+def _get_downloads_directory():
+    """Return the user's Downloads folder, never the profile directory.
+
+    CSIDL 0x28 is CSIDL_PROFILE, not Downloads. Use FOLDERID_Downloads and
+    fall back to ~/Downloads only when that directory exists.
+    """
+    if sys.platform == 'win32':
+        try:
+            from ctypes import wintypes
+
+            class _KNOWNFOLDERID(ctypes.Structure):
+                _fields_ = [
+                    ('Data1', wintypes.DWORD),
+                    ('Data2', wintypes.WORD),
+                    ('Data3', wintypes.WORD),
+                    ('Data4', ctypes.c_ubyte * 8),
+                ]
+
+            folder_id = _KNOWNFOLDERID(
+                0x374DE290,
+                0x123F,
+                0x4565,
+                (ctypes.c_ubyte * 8)(0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B),
+            )
+            shell32 = ctypes.windll.shell32
+            ole32 = ctypes.windll.ole32
+            shell32.SHGetKnownFolderPath.argtypes = [
+                ctypes.POINTER(_KNOWNFOLDERID),
+                wintypes.DWORD,
+                wintypes.HANDLE,
+                ctypes.POINTER(ctypes.c_wchar_p),
+            ]
+            shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            pointer = ctypes.c_wchar_p()
+            result = shell32.SHGetKnownFolderPath(
+                ctypes.byref(folder_id), 0, None, ctypes.byref(pointer)
+            )
+            path = pointer.value if result == 0 else None
+            if pointer:
+                ole32.CoTaskMemFree(pointer)
+            if path:
+                return path
+        except Exception:
+            pass
+    fallback = os.path.join(os.path.expanduser('~'), 'Downloads')
+    if os.path.isdir(fallback):
+        return fallback
+    return None
+
 def _coerce_bool(value, default=False):
     """把持久化的布尔设置归一化为 bool：真布尔原样；字符串按 true/1/yes/on 解析；其余回退默认。"""
     if isinstance(value, bool):
@@ -439,7 +500,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.6.10'
+APP_VERSION = '0.7.0'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -1009,9 +1070,15 @@ def _normalize_folder_structure(value):
         }
     custom = value.get('custom_folders')
     if isinstance(custom, list):
-        result['custom_folders'] = [
-            item for item in custom if isinstance(item, str) and item.strip()
-        ]
+        seen = set()
+        folders = []
+        for item in custom:
+            safe_name = _safe_structure_folder_name(item)
+            key = safe_name.casefold() if safe_name else ''
+            if safe_name and key not in seen:
+                seen.add(key)
+                folders.append(safe_name)
+        result['custom_folders'] = folders
     return result
 
 # 各类文件预览的截断阈值（产品行为参数，集中可调）
@@ -2093,8 +2160,9 @@ def _winhttp_ctypes():
             ('dwFlags', wintypes.DWORD),
             ('dwAutoDetectFlags', wintypes.DWORD),
             ('lpszAutoConfigUrl', wintypes.LPCWSTR),
-            ('fAutoLogonIfChallenged', wintypes.BOOL),
+            ('lpvReserved', ctypes.c_void_p),
             ('dwReserved', wintypes.DWORD),
+            ('fAutoLogonIfChallenged', wintypes.BOOL),
         ]
 
     class WINHTTP_PROXY_INFO(ctypes.Structure):
@@ -2123,8 +2191,9 @@ def _fill_winhttp_autoproxy_options(options, auto_url):
         options.dwFlags = 0x00000001  # WINHTTP_AUTOPROXY_AUTO_DETECT
         options.dwAutoDetectFlags = 0x00000001 | 0x00000002  # DHCP + DNS/WPAD
         options.lpszAutoConfigUrl = None
-    options.fAutoLogonIfChallenged = True
+    options.lpvReserved = None
     options.dwReserved = 0
+    options.fAutoLogonIfChallenged = True
     return options
 
 
@@ -3360,9 +3429,34 @@ class NewStructureDialog(QDialog):
                 preview += f'  - {folder_name}\n'
         self.preview_text.setPlainText(preview)
         
+    def _custom_folder_names(self):
+        names = []
+        invalid = []
+        for edit in self.custom_folders:
+            text = edit.text().strip()
+            if not text:
+                continue
+            safe_name = _safe_structure_folder_name(text)
+            if safe_name:
+                names.append(safe_name)
+            else:
+                reason = _validate_windows_filename(text) or '名称无效'
+                invalid.append('%s：%s' % (text, reason))
+        return names, invalid
+
     def create_structure(self):
         if not re.match(r'^\d{2}$', self.version):
             QMessageBox.warning(self, '警告', '版本号必须是两位数字')
+            return
+        _names, invalid = self._custom_folder_names()
+        if invalid:
+            QMessageBox.warning(
+                self,
+                '警告',
+                '这些名称不能作为版本目录下的子文件夹：\n'
+                + '\n'.join(invalid)
+                + '\n\n这里只能填单个文件夹名。打开 C:、D:、E: 等磁盘根目录请用快捷访问，不受这项限制。',
+            )
             return
         self.save_folder_structure()
         self.accept()
@@ -3371,7 +3465,7 @@ class NewStructureDialog(QDialog):
         """保存文件夹结构设置到主窗口"""
         if self.parent_window:
             # 收集当前设置
-            custom_folders = [edit.text().strip() for edit in self.custom_folders if edit.text().strip()]
+            custom_folders = self._custom_folder_names()[0]
             
             # 更新主窗口的文件夹结构设置
             self.parent_window.folder_structure = {
@@ -3397,7 +3491,7 @@ class NewStructureDialog(QDialog):
     
     def get_structure_info(self):
         selected_folders = [name for name, checked in self.selected_folders.items() if checked]
-        custom_folders = [edit.text().strip() for edit in self.custom_folders if edit.text().strip()]
+        custom_folders = self._custom_folder_names()[0]
         return {
             'version': self.version,
             'selected_folders': selected_folders,
@@ -3667,7 +3761,7 @@ class SettingsDialog(_ReorderableTableDialog):
 
 
 class SevenZipSettingsDialog(QDialog):
-    """配置 RAR/7Z 预览授权，以及预览和解压共用的 7z.exe 路径。"""
+    """配置 RAR/7Z 预览和解压授权，以及共用的 7z.exe 路径。"""
 
     def __init__(self, current_path='', enable_7zip=False, parent=None):
         super().__init__(parent)
@@ -3678,12 +3772,12 @@ class SevenZipSettingsDialog(QDialog):
 
         layout = QVBoxLayout()
 
-        self.enable_checkbox = QCheckBox('启用 .rar / .7z 的 7-Zip 预览')
+        self.enable_checkbox = QCheckBox('启用 .rar / .7z 的 7-Zip 预览和解压')
         self.enable_checkbox.setChecked(self.enable_7zip)
         layout.addWidget(self.enable_checkbox)
 
         warning_label = QLabel(
-            '安全提示：启用后，预览 .rar / .7z 时会启动外部 7z.exe。'
+            '安全提示：启用后，预览或解压 .rar / .7z 时会启动外部 7z.exe。'
             '请仅使用可信来源的官方 7-Zip，及时更新，并谨慎处理来源不明的压缩包。'
         )
         warning_label.setWordWrap(True)
@@ -4294,6 +4388,7 @@ class MainWindow(QMainWindow):
         self.create_menu()
         # 控件全部建好后再恢复分栏位置，否则 setSizes 会被后续布局覆盖
         self._restore_splitter_sizes()
+        self._apply_hidden_files_filter()
     
     def _restore_window_geometry(self):
         """用持久化的窗口几何与最大化标志恢复主窗口。
@@ -4614,7 +4709,6 @@ class MainWindow(QMainWindow):
         # 获取系统特殊文件夹路径
         CSIDL_DESKTOP = 0x00
         CSIDL_MYPICTURES = 0x27
-        CSIDL_DOWNLOADS = 0x28
         
         def get_special_folder(csidl):
             try:
@@ -4632,7 +4726,7 @@ class MainWindow(QMainWindow):
         pictures = get_special_folder(CSIDL_MYPICTURES)
         if pictures and os.path.exists(pictures):
             default_paths.append(('图片', pictures, False))
-        downloads = get_special_folder(CSIDL_DOWNLOADS)
+        downloads = _get_downloads_directory()
         if downloads and os.path.exists(downloads):
             default_paths.append(('下载', downloads, False))
         
@@ -7104,6 +7198,9 @@ class MainWindow(QMainWindow):
             return
         sevenzip = None
         if ext in ('.rar', '.7z'):
+            if not getattr(self, 'enable_7zip', False):
+                QMessageBox.warning(self, '错误', '7-Zip 压缩包解压尚未启用，请先在设置中启用')
+                return
             sevenzip = self._find_7z_tool()
             if not sevenzip:
                 QMessageBox.warning(
@@ -7476,14 +7573,18 @@ class MainWindow(QMainWindow):
                 created = []
                 failed = []
                 for folder in all_folders:
-                    folder_path = os.path.join(version_folder, folder)
+                    safe_name = _safe_structure_folder_name(folder)
+                    if not safe_name:
+                        failed.append('%s（%s）' % (folder, _validate_windows_filename(str(folder).strip()) or '名称无效'))
+                        continue
+                    folder_path = os.path.join(version_folder, safe_name)
                     if os.path.exists(folder_path):
                         continue
                     try:
                         os.makedirs(folder_path)
-                        created.append(folder)
+                        created.append(safe_name)
                     except Exception as fe:
-                        failed.append(f'{folder}（{fe}）')
+                        failed.append(f'{safe_name}（{fe}）')
                 if failed:
                     msg = f'已创建 {len(created)} 个子文件夹，以下创建失败：\n' + '\n'.join('· ' + f for f in failed)
                     msg += '\n\n请检查目标是否为只读、网络盘是否断开或权限不足。'
@@ -7820,7 +7921,7 @@ class MainWindow(QMainWindow):
             '7-Zip 压缩包预览未启用\n\n'
             f'文件: {os.path.basename(file_path)}\n\n'
             '程序尚未读取此 .rar / .7z 压缩包。\n'
-            '如需预览，请打开“设置 → 7-Zip路径设置”，确认 7z.exe 来源可信后启用。\n'
+            '如需预览或解压，请打开“设置 → 7-Zip路径设置”，确认 7z.exe 来源可信后启用。\n'
             '建议使用最新版本的官方 7-Zip，并仅处理来源可信的压缩包。\n\n'
             '.zip 文件使用程序内置能力预览，不受此开关影响。'
         )
@@ -8390,7 +8491,7 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
-            '<p>0.6.10 修复双击快捷访问按钮反复打开资源管理器并卡死、不预览按钮慢速双击打开两次、双击后单击偶发失效，以及标签和占用分析入口双击重复触发；文档补充默认快捷访问说明。0.6.9 在「文件」和「设置」之间增加「编辑」菜单，文件树右键操作和撤回都放在这里；复制完整路径、复制相对路径只保留在编辑菜单。有快捷键的项只在名称后面显示按键。0.6.8 修复撤回未完成时可重试；'
+            '<p>0.7.0 修正默认「下载」快捷访问（不再指向用户主目录）、未启用时禁止解压 .rar/.7z、拒绝会逃出版本目录的自定义文件夹名，并按 Windows SDK 修正系统代理解析结构体；启动时会应用已保存的「显示隐藏文件」。0.6.10 修复双击快捷访问按钮反复打开资源管理器并卡死、不预览按钮慢速双击打开两次、双击后单击偶发失效，以及标签和占用分析入口双击重复触发；文档补充默认快捷访问说明。0.6.9 在「文件」和「设置」之间增加「编辑」菜单，文件树右键操作和撤回都放在这里；复制完整路径、复制相对路径只保留在编辑菜单。有快捷键的项只在名称后面显示按键。0.6.8 修复撤回未完成时可重试；'
             '并保留此前的占用分析、资源管理器选中、PAC/系统代理支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
             f'<p>GitHub：<a href="{GITHUB_REPO_URL}">{GITHUB_REPO_URL}</a></p>'
@@ -8443,7 +8544,7 @@ class MainWindow(QMainWindow):
 <li>按需要勾选 <b>包含子文件夹</b>、<b>按编号排序</b>，点击确定后程序会自动刷新项目列表。</li>
 <li>在左侧搜索或选择项目，右侧文件树会显示该项目内容。</li>
 <li>单击文件查看预览与元数据，双击文件则用系统默认程序打开。</li>
-<li>如需预览/解压 <code>.rar</code>、<code>.7z</code>，请在 <b>设置 → 7-Zip路径设置</b> 中确认 7z.exe 可用。</li>
+<li>如需预览或解压 <code>.rar</code>、<code>.7z</code>，请在 <b>设置 → 7-Zip路径设置</b> 中指定可信的 7z.exe，并勾选启用。未勾选时不能预览也不能解压；<code>.zip</code> 不受此开关影响。</li>
 </ol>
 
 <h3 style="color: #2980b9;">二、检查更新与下载更新</h3>
@@ -8544,7 +8645,7 @@ class MainWindow(QMainWindow):
 <li>包内只有一个顶层项目 → 直接解压到当前目录</li>
 <li>包内有多个顶层项目 → 创建与压缩包同名的文件夹，解压到其中，避免文件散落</li>
 </ul>
-<p><code>.zip</code> 使用内置解压；<code>.rar</code> / <code>.7z</code> 需要 7-Zip 支持。</p>
+<p><code>.zip</code> 使用内置解压。<code>.rar</code> / <code>.7z</code> 的预览和解压都要在 7-Zip 设置中勾选启用，并使用名为 7z.exe 的官方程序。</p>
 
 <p><b>2. 添加到 zip 压缩包</b></p>
 <ul>
@@ -8554,7 +8655,7 @@ class MainWindow(QMainWindow):
 </ul>
 
 <p><b>3. 7-Zip 路径设置</b></p>
-<p>菜单 <b>设置 → 7-Zip路径设置</b> 可手动指定 7z.exe。程序按以下顺序自动查找：</p>
+<p>菜单 <b>设置 → 7-Zip路径设置</b> 可勾选启用 .rar / .7z 的预览和解压，并手动指定 7z.exe。未启用时这两类文件不能预览也不能解压。程序按以下顺序自动查找：</p>
 <ol>
 <li>设置中手动指定的路径</li>
 <li>程序所在目录下的 7z.exe</li>
@@ -8564,7 +8665,7 @@ class MainWindow(QMainWindow):
 
 <h3 style="color: #2980b9;">七、快捷访问栏</h3>
 <p>菜单栏下方的快捷访问栏提供常用文件夹的快速入口：</p>
-<p>默认快捷访问包含桌面、图片、下载以及 C:、D:、E: 盘根目录（均按本机实际存在情况生成）；磁盘根目录默认按“不显示预览”创建，可在快捷访问设置中重命名、排序或删除。</p>
+<p>默认快捷访问包含桌面、图片、下载以及 C:、D:、E: 盘根目录（均按本机实际存在情况生成）。「下载」使用系统的下载文件夹，不会再误用用户主目录。磁盘根目录默认按“不显示预览”创建，可在快捷访问设置中重命名、排序或删除。新建版本结构时，自定义子文件夹只能是单个文件夹名，不能写成盘符或带 <code>..</code> 的路径；查看磁盘根目录请用快捷访问。</p>
 <ul>
 <li><b>普通按钮</b>（默认样式）：点击后在文件树中显示该文件夹内容</li>
 <li><b>不显示预览按钮</b>（灰色斜体）：点击后直接在资源管理器中打开</li>
@@ -8629,7 +8730,7 @@ class MainWindow(QMainWindow):
 <ul>
 <li><b>找不到项目</b>：检查根目录是否添加正确、项目文件夹是否符合 S/M + 3~4 位数字规则；若项目在更深层目录，请勾选“包含子文件夹”</li>
 <li><b>列表顺序不符合预期</b>：检查是否启用了“按编号排序”；关闭后会按根目录添加顺序分组显示</li>
-<li><b>.rar / .7z 无法预览或解压</b>：安装 7-Zip，或在 <b>设置 → 7-Zip路径设置</b> 中手动指定 7z.exe</li>
+<li><b>.rar / .7z 无法预览或解压</b>：安装官方 7-Zip，在 <b>设置 → 7-Zip路径设置</b> 中指定 7z.exe，并勾选启用。只找到程序但未勾选时，预览和解压都会拒绝。</li>
 <li><b>大目录打开慢</b>：把该路径加入快捷访问并设置为“不显示预览”，或避免把磁盘根目录作为普通预览入口</li>
 <li><b>不小心删除文件</b>：程序会移入系统回收站，可点击状态栏右侧回收站按钮打开并恢复</li>
 <li><b>预览内容乱码</b>：文本预览会尝试 UTF-8 / GBK；若仍乱码，请用专业编辑器或对应软件打开原文件</li>

@@ -292,11 +292,13 @@ class ProxySupportTests(unittest.TestCase):
                 'dwFlags',
                 'dwAutoDetectFlags',
                 'lpszAutoConfigUrl',
-                'fAutoLogonIfChallenged',
+                'lpvReserved',
                 'dwReserved',
+                'fAutoLogonIfChallenged',
             ],
         )
         fields = dict(options_cls._fields_)
+        self.assertIs(fields['lpvReserved'], ctypes.c_void_p)
         self.assertIs(fields['fAutoLogonIfChallenged'], wintypes.BOOL)
         self.assertIs(fields['dwReserved'], wintypes.DWORD)
         self.assertEqual(
@@ -304,9 +306,10 @@ class ProxySupportTests(unittest.TestCase):
             ['dwAccessType', 'lpszProxy', 'lpszProxyBypass'],
         )
         if ctypes.sizeof(ctypes.c_void_p) == 8:
-            self.assertEqual(ctypes.sizeof(options_cls), 24)
-            self.assertEqual(options_cls.fAutoLogonIfChallenged.offset, 16)
-            self.assertEqual(options_cls.dwReserved.offset, 20)
+            self.assertEqual(ctypes.sizeof(options_cls), 32)
+            self.assertEqual(options_cls.lpvReserved.offset, 16)
+            self.assertEqual(options_cls.dwReserved.offset, 24)
+            self.assertEqual(options_cls.fAutoLogonIfChallenged.offset, 28)
 
     def test_winhttp_autoproxy_options_keep_reserved_zero(self):
         _ie_cls, options_cls, _info_cls = main._winhttp_ctypes()
@@ -314,11 +317,13 @@ class ProxySupportTests(unittest.TestCase):
         self.assertEqual(pac.dwFlags, 0x00000002)
         self.assertEqual(pac.lpszAutoConfigUrl, 'http://proxy.example/wpad.dat')
         self.assertEqual(pac.dwAutoDetectFlags, 0)
+        self.assertFalse(pac.lpvReserved)
         self.assertEqual(pac.dwReserved, 0)
         self.assertTrue(pac.fAutoLogonIfChallenged)
         detect = main._fill_winhttp_autoproxy_options(options_cls(), '')
         self.assertEqual(detect.dwFlags, 0x00000001)
         self.assertEqual(detect.dwAutoDetectFlags, 0x00000003)
+        self.assertFalse(detect.lpvReserved)
         self.assertEqual(detect.dwReserved, 0)
         self.assertTrue(detect.fAutoLogonIfChallenged)
 
@@ -339,6 +344,7 @@ class ProxySupportTests(unittest.TestCase):
             captured['dwFlags'] = int(options.dwFlags)
             captured['dwAutoDetectFlags'] = int(options.dwAutoDetectFlags)
             captured['dwReserved'] = int(options.dwReserved)
+            captured['lpvReserved'] = options.lpvReserved
             captured['fAutoLogonIfChallenged'] = bool(options.fAutoLogonIfChallenged)
             captured['size'] = ctypes.sizeof(type(options))
             return 0
@@ -353,13 +359,38 @@ class ProxySupportTests(unittest.TestCase):
         with mock.patch.object(main.ctypes, 'windll', fake_windll):
             result = main._get_windows_proxy_for_url('https://example.invalid/update')
         self.assertEqual(result, {})
-        self.assertEqual(captured['names'][3], 'fAutoLogonIfChallenged')
+        self.assertEqual(captured['names'][3], 'lpvReserved')
         self.assertEqual(captured['dwFlags'], 0x00000001)
         self.assertEqual(captured['dwAutoDetectFlags'], 0x00000003)
+        self.assertFalse(captured['lpvReserved'])
         self.assertEqual(captured['dwReserved'], 0)
         self.assertTrue(captured['fAutoLogonIfChallenged'])
         if ctypes.sizeof(ctypes.c_void_p) == 8:
-            self.assertEqual(captured['size'], 24)
+            self.assertEqual(captured['size'], 32)
+
+
+class DefaultQuickAccessTests(unittest.TestCase):
+    def test_downloads_shortcut_uses_known_folder_helper(self):
+        with mock.patch.object(main, '_get_downloads_directory', return_value=r'D:\Downloads'):
+            with mock.patch.object(main.os.path, 'exists', return_value=True):
+                paths = main.MainWindow._get_default_quick_access_paths(object())
+        self.assertIn(('下载', r'D:\Downloads', False), paths)
+
+    def test_missing_downloads_directory_is_omitted(self):
+        with mock.patch.object(main, '_get_downloads_directory', return_value=r'Z:\missing-downloads'):
+            with mock.patch.object(main.os.path, 'exists', return_value=False):
+                paths = main.MainWindow._get_default_quick_access_paths(object())
+        self.assertFalse(any(item[0] == '下载' for item in paths))
+
+    def test_downloads_directory_is_not_the_user_profile(self):
+        path = main._get_downloads_directory()
+        if not path:
+            self.skipTest('本机没有可用的下载目录')
+        self.assertNotEqual(
+            os.path.normcase(os.path.abspath(path)),
+            os.path.normcase(os.path.abspath(os.path.expanduser('~'))),
+        )
+        self.assertTrue(os.path.isdir(path))
 
 
 class SaveFileVersionTests(unittest.TestCase):
@@ -996,6 +1027,20 @@ class SevenZipSettingsTests(unittest.TestCase):
 
         with mock.patch.object(main.os.path, 'isfile', side_effect=only_arbitrary_exe_exists):
             self.assertIsNone(main.MainWindow._find_7z_tool(window))
+
+    def test_extract_refuses_rar_and_7z_until_enabled(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            archive = os.path.join(root, 'sample.7z')
+            with open(archive, 'wb') as stream:
+                stream.write(b'not a real archive')
+            window = SimpleNamespace(
+                enable_7zip=False,
+                _find_7z_tool=mock.Mock(return_value=os.path.join(root, '7z.exe')),
+            )
+            with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                main.MainWindow.smart_extract(window, archive)
+            window._find_7z_tool.assert_not_called()
+            self.assertIn('尚未启用', warning.call_args.args[2])
 
 
 class PreviewButtonFlowTests(unittest.TestCase):
@@ -1662,11 +1707,14 @@ class FolderStructureNormalizationTests(unittest.TestCase):
         normalized = main._normalize_folder_structure({
             'version': '7',
             'selected_folders': {'BOM': 'false'},
-            'custom_folders': ['A', '', 1, ' B '],
+            'custom_folders': ['A', '', 1, ' B ', '..', 'C:/abs', 'nested/child'],
         })
         self.assertEqual(normalized['version'], '07')
         self.assertFalse(normalized['selected_folders']['BOM'])
-        self.assertEqual(normalized['custom_folders'], ['A', ' B '])
+        self.assertEqual(normalized['custom_folders'], ['A', 'B'])
+        self.assertIsNone(main._safe_structure_folder_name('..'))
+        self.assertIsNone(main._safe_structure_folder_name('C:/abs'))
+        self.assertEqual(main._safe_structure_folder_name(' 物料 '), '物料')
 
     def test_load_settings_normalizes_folder_structure(self):
         with tempfile.TemporaryDirectory() as root:

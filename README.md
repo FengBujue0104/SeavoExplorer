@@ -1,8 +1,8 @@
 # SeavoExplorer 主板项目文件浏览器
 
-**版本 0.6.10**
+**版本 0.7.0**
 
-Windows 单文件版可从 [v0.6.10 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.10) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
+Windows 单文件版可从 [v0.7.0 Release](https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.7.0) 下载。发布页同时提供独立 SHA-256 文件和 build manifest；下载后应核对附件中的哈希。
 
 ---
 
@@ -43,7 +43,7 @@ SeavoExplorer 是一个 Windows 桌面工具，用于浏览以 S/M 编号命名�
 | 压缩包文件 | .zip .rar .7z | 树状结构展示 |
 | 工程文件 | .opj .dsn .sch .brd .dbk .dsnlck | 不直接解析，显示不可预览提示 |
 
-> **预览开关**：在「设置 → 预览设置」中可按类型关闭自动预览；关闭后仍可对当前文件点击「显示预览」。RAR/7Z 还需要在「7-Zip 路径设置」中显式启用并选择可信的官方 `7z.exe`，ZIP 不受该授权开关影响。 为避免大列表或大表格拖慢界面，压缩包预览最多列出 5000 项、2 MiB 输出；Excel 预览最多显示 20 个工作表、每表 10 行和 64 列。
+> **预览开关**：在「设置 → 预览设置」中可按类型关闭自动预览；关闭后仍可对当前文件点击「显示预览」。RAR/7Z 的预览和解压都要在「7-Zip 路径设置」中显式启用并选择可信的官方 `7z.exe`，ZIP 不受该授权开关影响。 为避免大列表或大表格拖慢界面，压缩包预览最多列出 5000 项、2 MiB 输出；Excel 预览最多显示 20 个工作表、每表 10 行和 64 列。
 
 ### 4. 文件操作
 
@@ -64,6 +64,16 @@ SeavoExplorer 是一个 Windows 桌面工具，用于浏览以 S/M 编号命名�
 - 旧配置会在正常保存时自动迁移为统一路径格式
 - PDF、Excel、Word 和视频预览完成后会释放读取资源；重命名、归档或移入回收站前会清理当前预览，避免文件被 SeavoExplorer 占用
 - 「项目文件夹设置」默认窗口更大，路径表格至少显示四行
+
+#### 🆕 0.7.0 路径、解压授权与系统代理
+
+- 默认「下载」快捷访问改为系统下载文件夹。旧逻辑把 CSIDL `0x28` 当成下载目录，实际得到的是用户主目录。
+- 查看 C:、D:、E: 磁盘根目录仍在快捷访问中，不受影响。
+- 未勾选 7-Zip 启用时，`.rar` / `.7z` 不能预览，也不能解压。ZIP 仍使用内置解压。
+- 新建版本结构时，自定义子文件夹只能是单个合法文件夹名。`..`、盘符路径和带分隔符的名字会被拒绝，并说明原因。
+- Windows 系统代理解析结构体改为 SDK 布局（补上保留指针字段）。
+- 启动时会把已保存的「显示隐藏文件」应用到文件树，而不只是恢复菜单勾选。
+- 回归测试现为 168 项（138 项产品测试 + 30 项 tooling 测试）。
 
 #### 🆕 0.6.10 快捷访问双击修复
 
@@ -255,7 +265,7 @@ python -m venv .venv-build
 .\.venv-build\Scripts\python.exe -m pip install -r requirements-build.txt
 ```
 
-两个包装器都使用同一个权威配置 `main.spec`，默认离线执行版本/资源检查、Python 3.8 grammar、`py_compile`、164 项回归测试、PyInstaller 构建、二进制来源审计和净化环境下的隔离启动冒烟；不会自动安装依赖或重生成图标。
+两个包装器都使用同一个权威配置 `main.spec`，默认离线执行版本/资源检查、Python 3.8 grammar、`py_compile`、168 项回归测试、PyInstaller 构建、二进制来源审计和净化环境下的隔离启动冒烟；不会自动安装依赖或重生成图标。
 
 ### 单文件 exe
 
@@ -299,9 +309,9 @@ python -m py_compile main.py test_safety.py test_tooling.py gui_smoke.py build_s
 git diff --check
 ```
 
-当前共 164 项 unittest：`test_safety.py` 的 134 项覆盖产品安全关键路径，`test_tooling.py` 的 30 项覆盖版本/哈希、严格构建环境、manifest、本地资产快照、onedir 完整遍历、环境净化、二进制来源、代码签名及 GitHub 发布状态校验；它们不等同于完整 GUI 人工验收。
+当前共 168 项 unittest：`test_safety.py` 的 138 项覆盖产品安全关键路径，`test_tooling.py` 的 30 项覆盖版本/哈希、严格构建环境、manifest、本地资产快照、onedir 完整遍历、环境净化、二进制来源、代码签名及 GitHub 发布状态校验；它们不等同于完整 GUI 人工验收。
 
-可选的真实窗口冒烟不在上述 164 项里，也不会随构建/发布自动运行：
+可选的真实窗口冒烟不在上述 168 项里，也不会随构建/发布自动运行：
 
 ```powershell
 python gui_smoke.py

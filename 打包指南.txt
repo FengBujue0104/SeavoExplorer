@@ -83,7 +83,7 @@ python -m venv .venv-build
 2. 核对 `main.py`、`pyproject.toml`、README 版本一致，以及两份图标完整。
 3. 检查所有顶层 Python 文件的 Python 3.8 grammar。
 4. 在清除 `PYTHONPATH`、`PYTHONHOME` 和外部 Qt 路径的环境中运行 `py_compile`、setuptools `pyproject.toml` 校验，再运行 `git diff --check`。
-5. 在同一净化环境中运行 `python -m unittest -q test_safety.py test_tooling.py`（当前共 164 项）。
+5. 在同一净化环境中运行 `python -m unittest -q test_safety.py test_tooling.py`（当前共 168 项）。
 6. 以净化后的 PATH 调用 `python -m PyInstaller --noconfirm --clean main.spec`。
 7. 审计 `Analysis-00.toc`：二进制来源只允许仓库、当前 Python 和 Windows 系统目录，避免 MiKTeX 等全局 PATH 中的 DLL 混入。
 8. 把 EXE 复制到临时目录，以净化 PATH 和 Qt offscreen 模式做 6 秒隔离启动冒烟；结束时终止完整 PyInstaller 进程树，不会读取真实 sidecar 配置，也不会借用宿主机的外部 Qt 插件或 DLL 路径。
@@ -198,7 +198,7 @@ $env:SEAVO_REQUIRE_SIGNING="1"
 
 需要 GitHub CLI 2.94.0 或更高版本，并先执行 `gh auth login`。发布脚本必须用上述严格构建 venv 的 Python 运行。
 
-已发布版本不可重复发布；当前发布使用 `v0.6.10`：
+已发布版本不可重复发布；本次发布使用 `v0.7.0`：
 
 ```powershell
 .\.venv-build\Scripts\python.exe release.py vX.Y.Z
