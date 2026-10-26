@@ -195,5 +195,7 @@ git status --short
 - 已发布 v0.6.9 EXE 为 96,995,432 bytes，SHA-256：`191B03E41EA88BBB73113361F1331476F589E59C0B8F712D766258CB162A941F`；使用自签名证书，远端三资产 digest 已核对。本版在文件与设置之间增加编辑菜单，路径复制只保留在编辑菜单，快捷键只显示在项名后面。
 - annotated tag `v0.6.10`（tag object `671a0b7c5d21f4b03fefa7b7086ab222d61bcdf0`）指向 `457f7a0bbf39c8594b10a11f5423ff8ea5d292c3`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.10
 - 已发布 v0.6.10 EXE 为 96,995,800 bytes，SHA-256：`76677911B29A597FC452A6DA98E481040BAC42BB55F287E8F7FB694B774153B9`；使用自签名证书，远端三资产 digest 已核对。本版修复快捷访问/面包屑双击自我递归与重复触发、不预览按钮慢速双击双开、标签和占用分析入口双击重复触发，并补充默认快捷访问文档。
+- annotated tag `v0.7.0`（tag object `9d8d20d9b1cd2888f8252f147f4aa340a17e80a5`）指向 `edad0c3b3f6e903040e327d2665e270a530583a5`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.7.0
+- 已发布 v0.7.0 EXE 为 96,998,216 bytes，SHA-256：`CC574C4A007727B67DAC8CFB2B89300721E357F8A083837009BA4D58996A7469`；使用自签名证书，远端三资产 digest 已核对。本版修正默认下载目录、未启用时的 rar/7z 解压、版本目录名逃逸、WinHTTP 代理结构体，并在启动时应用隐藏文件设置。
 
 交付时明确报告修改文件、实际执行的检查、构建产物哈希和未执行事项；不要把“语法可解析”表述成“GUI 功能已验证”。
