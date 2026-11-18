@@ -15,6 +15,14 @@ import release
 
 TEST_TMP_ROOT = r'D:\tmp' if os.path.isdir(r'D:\tmp') else None
 
+UNSIGNED_SIGNATURE = {
+    'status': 'NotSigned',
+    'subject': '',
+    'thumbprint': '',
+    'self_signed': False,
+    'timestamp_subject': '',
+}
+
 
 @contextmanager
 def release_manifest_fixture():
@@ -84,6 +92,11 @@ def release_manifest_fixture():
                 build_support,
                 '_input_hashes',
                 return_value={'input.txt': 'B' * 64},
+            ))
+            stack.enter_context(mock.patch.object(
+                build_support,
+                'signature_info',
+                return_value=UNSIGNED_SIGNATURE,
             ))
             yield {
                 'root': root,
@@ -669,6 +682,116 @@ class CodeSigningTests(unittest.TestCase):
                 require_signed=True,
                 allow_untrusted=False,
             )
+        with self.assertRaises(build_support.BuildError) as ctx:
+            build_support.validate_code_signing(
+                {
+                    'mode': 'none',
+                    'signed': False,
+                    'pfx_password': 'super-secret',
+                },
+                require_signed=False,
+            )
+        self.assertIn('pfx_password', str(ctx.exception))
+        self.assertNotIn('super-secret', str(ctx.exception))
+
+    def test_release_artifacts_reject_unknown_signing_keys(self):
+        with release_manifest_fixture() as fixture:
+            fixture['manifest']['code_signing'] = {
+                'mode': 'none',
+                'signed': False,
+                'verified': False,
+                'trusted': False,
+                'self_signed': False,
+                'subject': '',
+                'thumbprint': '',
+                'status': 'NotSigned',
+                'timestamp_subject': '',
+                'pfx': r'C:\secrets\cert.pfx',
+            }
+            with open(fixture['manifest_path'], 'w', encoding='utf-8') as stream:
+                json.dump(fixture['manifest'], stream)
+            with self.assertRaises(build_support.BuildError) as ctx:
+                build_support.validate_release_artifacts('0.5.0', 'a' * 40)
+            self.assertIn('未公开字段', str(ctx.exception))
+            self.assertIn('pfx', str(ctx.exception))
+
+    def test_release_artifacts_require_signing_fields_match_exe(self):
+        with release_manifest_fixture() as fixture:
+            fixture['manifest']['code_signing'] = {
+                'mode': 'store',
+                'signed': True,
+                'verified': True,
+                'trusted': True,
+                'self_signed': True,
+                'subject': 'CN=Fake',
+                'thumbprint': 'ABC',
+                'status': 'Valid',
+                'timestamp_subject': '',
+            }
+            with open(fixture['manifest_path'], 'w', encoding='utf-8') as stream:
+                json.dump(fixture['manifest'], stream)
+            with mock.patch.dict(os.environ, {
+                'SEAVO_REQUIRE_SIGNING': '0',
+                'SEAVO_SIGN_ALLOW_UNTRUSTED': '1',
+            }, clear=False):
+                with self.assertRaises(build_support.BuildError) as ctx:
+                    build_support.validate_release_artifacts('0.5.0', 'a' * 40)
+            self.assertIn('实际签名不一致', str(ctx.exception))
+
+    def test_self_signed_untrusted_matches_actual_status(self):
+        actual = {
+            'status': 'UnknownError',
+            'subject': 'CN=SeavoExplorer Development',
+            'thumbprint': 'aabbcc',
+            'self_signed': True,
+            'timestamp_subject': '',
+        }
+        with release_manifest_fixture() as fixture:
+            fixture['manifest']['code_signing'] = {
+                'mode': 'store',
+                'signed': True,
+                'verified': False,
+                'trusted': False,
+                'self_signed': True,
+                'subject': 'CN=SeavoExplorer Development',
+                'thumbprint': 'AABBCC',
+                'status': 'UnknownError',
+                'timestamp_subject': '',
+            }
+            with open(fixture['manifest_path'], 'w', encoding='utf-8') as stream:
+                json.dump(fixture['manifest'], stream)
+            with mock.patch.object(build_support, 'signature_info', return_value=actual):
+                with mock.patch.dict(os.environ, {
+                    'SEAVO_REQUIRE_SIGNING': '1',
+                    'SEAVO_SIGN_ALLOW_UNTRUSTED': '1',
+                }, clear=False):
+                    manifest = build_support.validate_release_artifacts(
+                        '0.5.0', 'a' * 40
+                    )
+            self.assertEqual(
+                manifest['code_signing']['subject'],
+                'CN=SeavoExplorer Development',
+            )
+            with mock.patch.dict(os.environ, {'SEAVO_SIGN_ALLOW_UNTRUSTED': '1'}):
+                with mock.patch.object(build_support, 'signature_info', return_value=dict(actual, status='HashMismatch')):
+                    with self.assertRaisesRegex(build_support.BuildError, '摘要与内容不匹配'):
+                        build_support.validate_release_artifacts('0.5.0', 'a' * 40)
+
+    def test_make_self_signed_cert_script_refuses_overwrite(self):
+        script = os.path.join(build_support.ROOT_DIR, 'make_self_signed_cert.ps1')
+        with open(script, encoding='utf-8') as stream:
+            text = stream.read()
+        self.assertIn('SeavoExplorer-dev.cer', text)
+        self.assertIn('SeavoExplorer-dev.pfx', text)
+        self.assertIn('已存在，拒绝覆盖', text)
+        self.assertNotIn('Export-Certificate -Cert $cert -FilePath $cerPath -Force', text)
+
+    def test_run_command_timeout_raises_build_error(self):
+        expired = build_support.subprocess.TimeoutExpired(cmd=['hung'], timeout=1)
+        with mock.patch.object(build_support.subprocess, 'run', side_effect=expired):
+            with self.assertRaises(build_support.BuildError) as ctx:
+                build_support.run_command(['hung'], timeout=1)
+        self.assertIn('超时', str(ctx.exception))
 
     def test_find_signtool_prefers_explicit_env(self):
         with tempfile.TemporaryDirectory() as root:

@@ -12,6 +12,15 @@ if (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
 }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+$cerPath = Join-Path $OutputDir "SeavoExplorer-dev.cer"
+$pfxPath = Join-Path $OutputDir "SeavoExplorer-dev.pfx"
+if (Test-Path -LiteralPath $cerPath) {
+    throw "证书文件已存在，拒绝覆盖: $cerPath"
+}
+if ($PfxPassword -and (Test-Path -LiteralPath $pfxPath)) {
+    throw "PFX 文件已存在，拒绝覆盖: $pfxPath"
+}
+
 $cert = New-SelfSignedCertificate `
     -Type CodeSigningCert `
     -Subject $Subject `
@@ -20,13 +29,11 @@ $cert = New-SelfSignedCertificate `
     -CertStoreLocation "Cert:\CurrentUser\My" `
     -NotAfter (Get-Date).AddYears(3)
 
-$cerPath = Join-Path $OutputDir "SeavoExplorer-dev.cer"
-Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
+Export-Certificate -Cert $cert -FilePath $cerPath | Out-Null
 
 if ($PfxPassword) {
     $secure = ConvertTo-SecureString -String $PfxPassword -AsPlainText -Force
-    $pfxPath = Join-Path $OutputDir "SeavoExplorer-dev.pfx"
-    Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secure -Force | Out-Null
+    Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secure | Out-Null
 }
 
 if ($TrustLocal) {

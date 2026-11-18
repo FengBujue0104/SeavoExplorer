@@ -228,7 +228,7 @@ class PersistenceBackupFailureTests(unittest.TestCase):
             )
             stub._backup_corrupt_file = main.MainWindow._backup_corrupt_file.__get__(stub)
             stub.load_comments = main.MainWindow.load_comments.__get__(stub)
-            with mock.patch.object(main.os, 'replace', side_effect=PermissionError('backup failed')):
+            with mock.patch.object(main.os, 'rename', side_effect=PermissionError('backup failed')):
                 self.assertEqual(stub.load_comments(), {})
             self.assertTrue(stub._comments_load_failed)
 
@@ -263,6 +263,12 @@ class PersistenceBackupFailureTests(unittest.TestCase):
 
 
 class ProxySupportTests(unittest.TestCase):
+    def test_windows_proxy_bypass_matches_only_configured_hosts(self):
+        bypass = '<local>;*.example.test;127.0.0.1'
+        for host in ('intranet', 'docs.example.test', '127.0.0.1'):
+            self.assertTrue(main._matches_windows_proxy_bypass('https://' + host, bypass))
+        self.assertFalse(main._matches_windows_proxy_bypass('https://example.invalid', bypass))
+
     def test_parse_proxy_list(self):
         proxies = main._parse_proxy_list('http=127.0.0.1:7897;https=127.0.0.1:7898')
         self.assertEqual(proxies['http'], 'http://127.0.0.1:7897')
@@ -642,16 +648,16 @@ class QuickAccessDoubleClickTests(unittest.TestCase):
             self.assertEqual(stub._open_with_shell.call_count, 1)
             self._pump(700)  # 第二次 release 晚到：旧的时间窗实现会在此失效
             button.clicked.emit(False)
-            self._pump(300)
+            self._pump(self.app.doubleClickInterval() + 100)
             self.assertEqual(nav.call_count, 0)
             button.clicked.emit(False)
-            self._pump(300)
+            self._pump(self.app.doubleClickInterval() + 100)
             self.assertEqual(nav.call_count, 1)
             # 第二次 release 丢失：下一次按下清除残留抑制，单击不被吞
             button.mouseDoubleClickEvent(event)
             button.pressed.emit()
             button.clicked.emit(False)
-            self._pump(300)
+            self._pump(self.app.doubleClickInterval() + 100)
             self.assertEqual(nav.call_count, 2)
             parent.deleteLater()
 
@@ -1158,6 +1164,57 @@ class PreviewButtonFlowTests(unittest.TestCase):
 
 
 class UpdateDownloadSafetyTests(unittest.TestCase):
+    def test_invalid_resume_restarts_as_full_download(self):
+        for status in (206, 416):
+            with self.subTest(status=status), tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+                save_path = os.path.join(root, 'update.exe')
+                thread = main.UpdateDownloadThread('https://example.invalid/update.exe', save_path)
+                with open(thread.part_path, 'wb') as stream:
+                    stream.write(b'old')
+                stale = mock.MagicMock()
+                stale.getcode.return_value = 206
+                stale.headers = {'Content-Range': 'bytes 2-4/5'}
+                if status == 416:
+                    stale = urllib.error.HTTPError(thread.url, 416, 'range unavailable', None, None)
+                full = mock.MagicMock()
+                full.getcode.return_value = 200
+                full.headers = {'Content-Length': '5'}
+                full.read.side_effect = [b'fresh', b'']
+                with mock.patch.object(main, '_urlopen_with_proxy', side_effect=[stale, full]) as request:
+                    self.assertTrue(thread._download_once(1))
+                self.assertEqual(read_text(save_path), 'fresh')
+                self.assertEqual(request.call_args_list[0].args[0].get_header('Range'), 'bytes=3-')
+                self.assertIsNone(request.call_args_list[1].args[0].get_header('Range'))
+
+    def test_valid_resume_uses_total_from_content_range(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            save_path = os.path.join(root, 'update.exe')
+            thread = main.UpdateDownloadThread('https://example.invalid/update.exe', save_path)
+            with open(thread.part_path, 'wb') as stream:
+                stream.write(b'hel')
+            response = mock.MagicMock()
+            response.getcode.return_value = 206
+            response.headers = {'Content-Range': 'bytes 3-4/5'}
+            response.read.side_effect = [b'lo', b'']
+            with mock.patch.object(main, '_urlopen_with_proxy', return_value=response):
+                self.assertTrue(thread._download_once(1))
+            self.assertEqual(read_text(save_path), 'hello')
+
+    def test_wrong_size_is_rejected_before_replacing_destination(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            save_path = os.path.join(root, 'update.exe')
+            with open(save_path, 'wb') as stream:
+                stream.write(b'previous')
+            thread = main.UpdateDownloadThread('https://example.invalid/update.exe', save_path, expected_size=3)
+            response = mock.MagicMock()
+            response.getcode.return_value = 200
+            response.headers = {'Content-Length': '5'}
+            response.read.side_effect = [b'fresh', b'']
+            with mock.patch.object(main, '_urlopen_with_proxy', return_value=response):
+                with self.assertRaises(main.UpdateDownloadIntegrityError):
+                    thread._download_once(1)
+            self.assertEqual(read_text(save_path), 'previous')
+
     def test_terminal_failure_preserves_partial_for_resume(self):
         """网络类失败保留 .part 供下次续传（与取消路径语义一致）；失败消息含续传提示。"""
         with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
@@ -1417,6 +1474,11 @@ class ArchiveSafetyTests(unittest.TestCase):
         with mock.patch.object(main, 'ARCHIVE_MAX_PATH_CHARS', 7):
             with self.assertRaises(main.ArchiveSafetyError):
                 main._build_archive_manifest(raw_entries, 1)
+
+    def test_7z_parser_rejects_missing_or_invalid_file_size(self):
+        for size in ('', '\nSize = invalid', '\nSize = -1'):
+            with self.subTest(size=size), self.assertRaises(main.ArchiveSafetyError):
+                main._parse_7z_slt_output('Header\n----------\nPath = a.txt' + size)
 
     def test_7z_parser_flushes_last_record_without_blank_line(self):
         output = 'Header\n----------\nPath = a.txt\nSize = 3\nPacked Size = 2'
@@ -1909,6 +1971,70 @@ class UndoActionTests(unittest.TestCase):
         stub.archive_to_old_folder = main.MainWindow.archive_to_old_folder.__get__(stub)
         return stub
 
+    def test_replacement_at_same_path_is_never_undone(self):
+        for kind in ('create', 'rename', 'move'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+                current = os.path.join(root, 'current.txt')
+                original = os.path.join(root, 'original.txt')
+                with open(current, 'w', encoding='utf-8') as stream:
+                    stream.write('old')
+                records = {
+                    'create': main._make_undo_create([current]),
+                    'rename': main._make_undo_rename(current, original),
+                    'move': main._make_undo_move([(original, current)]),
+                }
+                window = self._window()
+                window._push_undo(records[kind])
+                os.rename(current, os.path.join(root, 'retained.txt'))
+                with open(current, 'w', encoding='utf-8') as stream:
+                    stream.write('replacement')
+                backend = mock.Mock()
+                with mock.patch.object(main, '_load_strict_recycle_backend', return_value=backend):
+                    with mock.patch.object(main.QMessageBox, 'warning'):
+                        self.assertFalse(window.undo_last_action())
+                backend.assert_not_called()
+                self.assertEqual(read_text(current), 'replacement')
+                self.assertFalse(os.path.exists(original))
+                self.assertFalse(window._undo_stack)
+
+    def test_failed_directory_copy_leaves_no_partial_destination(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            source = os.path.join(root, 'source')
+            destination = os.path.join(root, 'destination')
+            os.mkdir(source)
+            os.mkdir(destination)
+            def partial_copy(_source, staged, **_kwargs):
+                os.mkdir(staged)
+                with open(os.path.join(staged, 'partial.txt'), 'w', encoding='utf-8') as stream:
+                    stream.write('partial')
+                raise PermissionError('second file unavailable')
+            with mock.patch.object(main.shutil, 'copytree', side_effect=partial_copy):
+                with self.assertRaises(PermissionError):
+                    self._window()._paste_single(source, destination)
+            self.assertEqual(os.listdir(destination), [])
+
+    def test_partial_archive_keeps_undo_for_completed_items(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            first, second = [os.path.join(root, name) for name in ('first.txt', 'second.txt')]
+            for path in (first, second):
+                with open(path, 'w', encoding='utf-8') as stream:
+                    stream.write('original')
+            window = self._window()
+            rename = os.rename
+            def move(source, destination):
+                if source == second:
+                    raise PermissionError('second file unavailable')
+                return rename(source, destination)
+            with mock.patch.object(main.os, 'rename', side_effect=move):
+                with mock.patch.object(main.QMessageBox, 'warning') as warning:
+                    window.archive_to_old_folder([first, second])
+            warning.assert_called_once()
+            self.assertEqual(len(window._undo_stack), 1)
+            self.assertFalse(os.path.exists(first))
+            self.assertTrue(window.undo_last_action())
+            self.assertEqual(read_text(first), 'original')
+            self.assertEqual(read_text(second), 'original')
+
     def test_undo_rename_restores_original_name(self):
         with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
             original = os.path.join(root, 'a.txt')
@@ -2399,6 +2525,54 @@ class ClipboardPrecedenceTests(unittest.TestCase):
             with mock.patch.object(main.QApplication, 'clipboard', return_value=clipboard):
                 sources = main.MainWindow._get_clipboard_source_paths(window)
             self.assertEqual(sources, [])
+
+
+class UserFlowRegressionTests(unittest.TestCase):
+    def test_quick_access_save_failure_leaves_previous_items(self):
+        original = [('old', 'old folder', False)]
+        window = SimpleNamespace(quick_access_paths=original, settings=[], include_subfolders=False,
+                                 save_settings_to_file=mock.Mock(return_value=False),
+                                 _refresh_quick_access_toolbar=mock.Mock())
+        dialog = mock.Mock()
+        dialog.exec_.return_value = True
+        dialog.get_settings.return_value = [('new', 'new folder', False)]
+        with mock.patch.object(main, 'QuickAccessSettingsDialog', return_value=dialog):
+            with mock.patch.object(main.QMessageBox, 'information') as success:
+                main.MainWindow.show_quick_access_settings_dialog(window)
+        self.assertIs(window.quick_access_paths, original)
+        window._refresh_quick_access_toolbar.assert_not_called()
+        success.assert_not_called()
+
+    def test_cancel_restore_does_not_drop_offline_hidden_projects(self):
+        window = SimpleNamespace(hidden_folders=['offline folder'], save_settings_to_file=mock.Mock())
+        with mock.patch.object(main.QInputDialog, 'getItem', return_value=('', False)) as choose:
+            main.MainWindow.show_restore_hidden_projects_dialog(window)
+        self.assertEqual(window.hidden_folders, ['offline folder'])
+        choose.assert_called_once()
+        window.save_settings_to_file.assert_not_called()
+
+    def test_archive_preview_lists_entries_in_background_worker(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as root:
+            path = os.path.join(root, 'preview.zip')
+            with zipfile.ZipFile(path, 'w') as archive:
+                archive.writestr('éé.txt', 'hello')
+                archive.writestr('second.txt', 'bye')
+            worker = main.ArchivePreviewThread(path, None, None)
+            results = []
+            worker.preview_ready.connect(results.append)
+            with mock.patch.object(main, 'PREVIEW_ARCHIVE_MAX_ENTRIES', 1):
+                worker.run()
+            self.assertIn('éé.txt', results[0])
+            self.assertIn('仅列出前 1 项', results[0])
+            self.assertNotIn('second.txt', results[0])
+
+    def test_old_video_worker_cannot_clear_the_current_preview(self):
+        new_worker = mock.Mock()
+        window = SimpleNamespace(_video_thumb_thread=new_worker, current_video_path='video.mp4',
+                                 sender=mock.Mock(return_value=mock.Mock()), _safe_stop_thread=mock.Mock())
+        main.MainWindow._on_video_frames_ready(window, 'video.mp4', [])
+        self.assertIs(window._video_thumb_thread, new_worker)
+        window._safe_stop_thread.assert_not_called()
 
 
 class DocumentationConsistencyTests(unittest.TestCase):

@@ -16,9 +16,9 @@
 
 ## 项目概况
 
-SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以 S/M 编号命名的硬件/PCB 项目目录。界面、业务和平台集成集中在约 7,648 行的 `main.py`。
+SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以 S/M 编号命名的硬件/PCB 项目目录。界面、业务和平台集成集中在 `main.py`。
 
-- 当前版本为 0.7.0；运行时版本的首要来源是 `main.py` 的 `APP_VERSION`。
+- 当前版本为 0.7.1；运行时版本的首要来源是 `main.py` 的 `APP_VERSION`。
 - 源码保持 Python 3.8 grammar 兼容；官方 Windows EXE 已验证环境为 Python 3.13.2 x64。
 - UI、用户提示和主要文档使用中文，文本统一 UTF-8。
 - Windows 是实际目标平台，代码使用 `os.startfile`、Windows Shell/`ctypes`、强制回收站接口和固定的 7-Zip 安装位置。
@@ -29,8 +29,8 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 | 路径 | 职责与注意事项 |
 | --- | --- |
 | `main.py` | 应用入口和全部主要产品逻辑；运行行为的首要事实来源。 |
-| `test_safety.py` | 138 项产品安全/回归测试；会导入 PyQt5，但使用临时数据，不应接触真实项目。 |
-| `test_tooling.py` | 30 项无网络辅助链路测试：版本、哈希、严格环境、manifest、快照、完整遍历、环境净化、tag/draft/assets。 |
+| `test_safety.py` | 150 项产品安全/回归测试；会导入 PyQt5，但使用临时数据，不应接触真实项目。 |
+| `test_tooling.py` | 35 项无网络辅助链路测试：版本、哈希、严格环境、manifest、快照、完整遍历、环境净化、tag/draft/assets。 |
 | `gui_smoke.py` | 可选真实窗口冒烟：占用分析、复制路径、撤回。使用隔离 sidecar 与临时项目，不读真实配置。不是 unittest，不纳入发布门禁；不要在默认验证或 `release.py` 中运行。 |
 | `requirements.txt` | Python >=3.8 源码运行依赖范围，不含 PyInstaller。 |
 | `requirements-build.txt` | Python 3.13.2 x64 官方构建环境的精确版本锁；除 venv 自带 pip/wheel 外，正式构建拒绝锁外发行包。 |
@@ -45,6 +45,7 @@ SeavoExplorer 是 Windows PyQt5 桌面文件浏览器，用于发现和管理以
 | `favicon_src.png` / `favicon.ico` | 必需且应跟踪的构建输入；干净克隆必须同时具备。 |
 | `README.md` | 面向用户的功能、安装和简要构建说明。 |
 | `打包指南.txt` | 面向维护者的权威 Windows 构建/发布流程。 |
+| `ANALYSIS_REPORT.md` | 截至 v0.6.0 的历史审查（对象当时为 0.5.4）。不是现行缺陷清单；事实以工作树代码、README 和打包指南为准。 |
 
 不要直接编辑或提交构建/运行产物：
 
@@ -145,7 +146,7 @@ git diff --check
 git status --short
 ```
 
-当前 168 项测试中，138 项产品测试覆盖版本/裸 `except`、默认路径、终端、回收站、7-Zip 授权、手动预览、路径规范化、预览资源释放、外部剪贴板粘贴、面包屑双击、快捷访问双击、保存版本后缀递增、更新 `.part`、事务式解压、正则结构安全、文本编码/BOM、zip 去重、folder_structure 归一化、失效根目录错误信号、old/ 守卫、PAC/WinHTTP 结构体、占用分析/资源管理器选中、撤回和文档一致性；30 项 tooling tests 覆盖构建/发布、代码签名和 manifest 的 fail-closed 契约。它们不是完整 GUI/所有文件格式的端到端测试，报告时必须区分。需要真实窗口时再手动运行 `python gui_smoke.py`；默认 unittest 和正式发布都不要跑它。
+当前 185 项测试中，150 项产品测试覆盖版本/裸 `except`、默认路径、终端、回收站、7-Zip 授权、手动预览、路径规范化、预览资源释放、外部剪贴板粘贴、面包屑双击、快捷访问双击、保存版本后缀递增、更新 `.part`、事务式解压、正则结构安全、文本编码/BOM、zip 去重、folder_structure 归一化、失效根目录错误信号、old/ 守卫、PAC/WinHTTP 结构体、占用分析/资源管理器选中、撤回和文档一致性；35 项 tooling tests 覆盖构建/发布、代码签名和 manifest 的 fail-closed 契约。它们不是完整 GUI/所有文件格式的端到端测试，报告时必须区分。需要真实窗口时再手动运行 `python gui_smoke.py`；默认 unittest 和正式发布都不要跑它。
 
 正式 onefile 验证必须使用由 `requirements-build.txt` 创建、未启用 system-site-packages，且除 venv 自带 pip/wheel 外无锁外包的 Python 3.13.2 x64 venv：
 
@@ -170,7 +171,7 @@ git status --short
 - annotated tag `v0.5.1` 指向 `c0b71a0`，发布页为：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.5.1
 - 已发布 v0.5.1 EXE 为 96,926,112 bytes，SHA-256：`126134AF93E31344768B847760B25FFE56F24C966AC36EE5216003D51B661937`。
 - draft→三资产 digest 核验→publish 自动化已随 v0.5.1 完成首次真实 GitHub 端到端发布；三个远端资产均已核对 digest。
-- 新构建会写入 PE FileVersion/ProductVersion；这不等于公共可信的 Authenticode 签名。当前 0.6.1 使用自签名证书。
+- 新构建会写入 PE FileVersion/ProductVersion；这不等于公共可信的 Authenticode 签名。当前发布（0.7.0）仍使用自签名证书。
 - 自定义正则安全检查已接入保存与解析链路，并在 0.6.0 升级为结构启发式；仍需注意它不能覆盖所有复杂正则。
 - annotated tag `v0.6.0`（tag object `589e35669d47f4b974160cb474def7d22f3b4228`）指向 `29b3dab5960ef9efd55a5123294f19ca17b38e7f`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.0
 - 已发布 v0.6.0 EXE 为 96,948,502 bytes，SHA-256：`44E769B707F6DDEB144B5994BF7674AE33FA9E64317243125387F615291A75D2`；远端三资产 digest 已核对。

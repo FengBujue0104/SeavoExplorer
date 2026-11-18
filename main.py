@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from collections import namedtuple
 import heapq
+from fnmatch import fnmatchcase
 
 # 尝试导入OpenCV用于视频缩略图生成
 try:
@@ -500,7 +501,7 @@ def _is_regex_safe(pattern):
     except Exception:
         return False, 'regex structure is too complex to analyze safely'
 
-APP_VERSION = '0.7.0'
+APP_VERSION = '0.7.1'
 GITHUB_REPO_URL = 'https://github.com/FengBujue0104/SeavoExplorer/'
 GITHUB_RELEASES_URL = 'https://github.com/FengBujue0104/SeavoExplorer/releases'
 GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/FengBujue0104/SeavoExplorer/releases/latest'
@@ -607,7 +608,7 @@ def _collect_largest_files(root, top_n=50, max_files=50000, is_canceled=None):
         max_files = 50000
     if max_files <= 0:
         max_files = 1
-    if not os.path.isdir(root):
+    if not os.path.isdir(root) or _is_reparse_point(root):
         raise FileNotFoundError('目录不存在或不可访问: %s' % root)
 
     heap = []
@@ -759,38 +760,48 @@ def _same_path(left, right):
 UNDO_STACK_LIMIT = 20
 
 
+def _object_identity(path):
+    """识别撤回记录里的文件或目录，避免操作后来出现的同名项。"""
+    if not path:
+        return None
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not info.st_ino:
+        return None
+    created = getattr(info, 'st_birthtime_ns', info.st_ctime_ns) if sys.platform == 'win32' else None
+    return info.st_dev, info.st_ino, created
+
+
+def _identity_matches(path, identity):
+    return identity is not None and _object_identity(path) == identity
+
+
 def _make_undo_rename(current_path, original_path, label='重命名'):
     return {
-        'kind': 'rename',
-        'current': current_path,
-        'original': original_path,
-        'label': label,
+        'kind': 'rename', 'current': current_path, 'original': original_path,
+        'label': label, 'identity': _object_identity(current_path),
     }
 
 
 def _make_undo_create(paths, label='创建的文件'):
-    return {
-        'kind': 'create',
-        'paths': [path for path in paths if path],
-        'label': label,
-    }
+    paths = [path for path in paths if path]
+    return {'kind': 'create', 'paths': paths, 'label': label,
+            'identities': {path: _object_identity(path) for path in paths}}
 
 
 def _make_undo_move(pairs, label='移动'):
-    cleaned = []
-    for original, current in pairs or []:
-        if original and current:
-            cleaned.append((original, current))
-    return {
-        'kind': 'move',
-        'pairs': cleaned,
-        'label': label,
-    }
+    pairs = [(original, current) for original, current in pairs if original and current]
+    return {'kind': 'move', 'pairs': pairs, 'label': label,
+            'identities': {current: _object_identity(current) for _, current in pairs}}
 
 
-def _undo_rename_possible(current, original):
+def _undo_rename_possible(current, original, identity):
     if not current or not os.path.lexists(current):
         return False, '撤回目标已不存在'
+    if not _identity_matches(current, identity):
+        return False, '无法确认仍是原文件，未撤回'
     if original and os.path.lexists(original) and not _same_path(current, original):
         return False, '原路径已被占用，未覆盖'
     if not original:
@@ -803,20 +814,12 @@ def _apply_undo_rename(current, original):
     return original
 
 
-def _undo_retryable_path(current, original):
-    """A failed rename/move can be retried only while that item still exists."""
-    return bool(current and original and os.path.lexists(current))
-
-
-def _apply_undo_create_paths(paths, recycle_fn):
-    """Send created files to recycle_fn. Fail closed: leftover files stay on disk."""
+def _apply_undo_create_paths(paths, recycle_fn, identities):
     successes = []
     errors = []
-    for path in paths or []:
-        if not path:
-            continue
-        if not os.path.lexists(path):
-            errors.append((path, '文件已不存在'))
+    for path in paths:
+        if not _identity_matches(path, identities.get(path)):
+            errors.append((path, '文件已不存在或已被替换，未撤回'))
             continue
         try:
             recycle_fn(path)
@@ -824,7 +827,6 @@ def _apply_undo_create_paths(paths, recycle_fn):
         except Exception as error:
             errors.append((path, str(error)))
     return successes, errors
-
 
 
 def _path_in_list(paths, path):
@@ -976,8 +978,10 @@ def _normalize_comments_map(comments):
     return result
 
 
-def _decode_zip_name(raw):
-    """解码 zip 条目名：旧式 zip 用 cp437 存中文名，依次尝试 gbk、utf-8 还原，都失败则用原值。"""
+def _decode_zip_name(raw, flag_bits=0):
+    """保留 ZIP 的 UTF-8 名称，仅尝试还原旧式编码。"""
+    if flag_bits & 0x800:
+        return raw
     for enc in ('gbk', 'utf-8'):
         try:
             return raw.encode('cp437').decode(enc)
@@ -1147,8 +1151,10 @@ ArchiveManifestEntry = namedtuple(
 
 
 def _is_unc_path(path):
-    normalized = str(path or '').replace('/', '\\')
-    return normalized.startswith('\\\\')
+    normalized = str(path or '').replace(chr(92), '/').casefold()
+    if normalized.startswith('//?/unc/'):
+        return True
+    return normalized.startswith('//') and not normalized.startswith(('//?/', '//./'))
 
 
 def _powershell_unc_location_args(folder_path):
@@ -1332,7 +1338,7 @@ def _zip_raw_entries(zf):
         is_link = stat.S_ISLNK(mode)
         is_special = bool(file_type and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or is_link))
         entries.append({
-            'name': _decode_zip_name(info.filename),
+            'name': _decode_zip_name(info.filename, info.flag_bits),
             'size': info.file_size,
             'compressed_size': info.compress_size,
             'is_dir': info.is_dir(),
@@ -1358,11 +1364,14 @@ def _parse_7z_slt_output(output):
         if len(entries) >= ARCHIVE_MAX_ENTRIES:
             raise ArchiveSafetyError(f'压缩包条目超过 {ARCHIVE_MAX_ENTRIES} 个')
         attrs = record.get('Attributes', '')
+        is_dir = record.get('Folder') == '+' or 'D' in attrs
+        if not is_dir and 'Size' not in record:
+            raise ArchiveSafetyError('7-Zip 条目缺少大小')
         entries.append({
             'name': record['Path'],
             'size': record.get('Size', 0),
             'compressed_size': record.get('Packed Size', 0),
-            'is_dir': record.get('Folder') == '+' or 'D' in attrs,
+            'is_dir': is_dir,
             'encrypted': record.get('Encrypted') == '+',
             'is_link': bool(record.get('Symbolic Link') or record.get('Hard Link')),
             'is_special': record.get('Alternate Stream') == '+' or record.get('Anti') == '+',
@@ -1382,11 +1391,13 @@ def _parse_7z_slt_output(output):
         if ' = ' not in line:
             continue
         key, value = line.split(' = ', 1)
-        if key in ('Size', 'Packed Size'):
+        if in_entries and key in ('Size', 'Packed Size'):
             try:
-                value = int(value)
-            except ValueError:
-                value = 0
+                value = int(value) if value or key == 'Size' else 0
+            except ValueError as error:
+                raise ArchiveSafetyError('7-Zip 条目大小无效') from error
+            if value < 0:
+                raise ArchiveSafetyError('7-Zip 条目大小无效')
         record[key] = value
     flush_record()
     return entries
@@ -1535,7 +1546,8 @@ def _commit_staged_extraction(stage_dir, parent_dir, archive_name):
         except OSError:
             shutil.rmtree(stage_dir, ignore_errors=True)
         return destination, not os.path.exists(stage_dir)
-    destination = _rename_without_overwrite(stage_dir, parent_dir, archive_name or '解压内容', True)
+    name = _safe_structure_folder_name(archive_name) or '解压内容'
+    destination = _rename_without_overwrite(stage_dir, parent_dir, name, True)
     return destination, True
 
 
@@ -2197,6 +2209,19 @@ def _fill_winhttp_autoproxy_options(options, auto_url):
     return options
 
 
+def _matches_windows_proxy_bypass(url, bypass):
+    host = urllib.parse.urlsplit(url).hostname or ''
+    host = host.casefold()
+    for pattern in re.split(r'[;,]', bypass or ''):
+        pattern = pattern.strip().casefold()
+        if pattern == '<local>':
+            if host and '.' not in host and ':' not in host:
+                return True
+        elif pattern and fnmatchcase(host, pattern):
+            return True
+    return False
+
+
 def _get_windows_proxy_for_url(url):
     """Resolve the current Windows user proxy, including PAC/WPAD if available."""
     if sys.platform != 'win32':
@@ -2246,6 +2271,8 @@ def _get_windows_proxy_for_url(url):
                         ctypes.byref(options),
                         ctypes.byref(info),
                     ):
+                        if _matches_windows_proxy_bypass(url, _proxy_wstring(info.lpszProxyBypass)):
+                            return {}
                         return _parse_proxy_list(_proxy_wstring(info.lpszProxy))
                 finally:
                     try:
@@ -2254,6 +2281,8 @@ def _get_windows_proxy_for_url(url):
                         pass
                     _free_windows_proxy_pointer(kernel32, info.lpszProxy)
                     _free_windows_proxy_pointer(kernel32, info.lpszProxyBypass)
+        if _matches_windows_proxy_bypass(url, _proxy_wstring(config.lpszProxyBypass)):
+            return {}
         return _parse_proxy_list(config_proxy)
     except Exception:
         return {}
@@ -2264,7 +2293,7 @@ def _get_windows_proxy_for_url(url):
 
 def _get_proxy_map_for_url(url):
     """Combine environment proxy variables with Windows system/PAC settings."""
-    proxies = dict(urllib.request.getproxies())
+    proxies = urllib.request.getproxies_environment()
     if sys.platform == 'win32' and not proxies.get('all') and (
         not proxies.get('http') or not proxies.get('https')
     ):
@@ -2291,10 +2320,7 @@ def _urlopen_with_proxy(request, timeout):
     """Open a URL through explicit proxy settings when one is available."""
     url = _validate_network_url(getattr(request, 'full_url', None) or str(request))
     proxies = _get_proxy_map_for_url(url)
-    handlers = []
-    if proxies:
-        handlers.append(urllib.request.ProxyHandler(proxies))
-    opener = urllib.request.build_opener(*handlers)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
     return opener.open(request, timeout=timeout)
 
 class UpdateDownloadIntegrityError(Exception):
@@ -2374,24 +2400,46 @@ class UpdateDownloadThread(QThread):
             raise UpdateDownloadIntegrityError(f'无法读取下载文件进行校验: {e}') from e
         return digest.hexdigest()
 
+    def _open_download(self, existing):
+        # 断点失效时，丢弃旧片段并发一次普通请求。
+        for start in (existing, 0) if existing else (0,):
+            request = self._make_request(start)
+            try:
+                response = _urlopen_with_proxy(request, timeout=self.DOWNLOAD_TIMEOUT)
+            except urllib.error.HTTPError as error:
+                if error.code != 416 or not start:
+                    raise
+                error.close()
+            else:
+                if response.getcode() != 206:
+                    if start:
+                        self.status_changed.emit('服务器未接受断点续传，正在从头重新下载...')
+                    return response, 0, 0
+                match = re.fullmatch(r'bytes ([0-9]+)-([0-9]+)/([0-9]+)',
+                                     response.headers.get('Content-Range', ''))
+                if start and match:
+                    first, last, total = map(int, match.groups())
+                    if first == start and first <= last == total - 1 and (
+                        not self.expected_size or self.expected_size == total
+                    ):
+                        return response, start, total
+                response.close()
+                if not start:
+                    raise UpdateDownloadIntegrityError('服务器返回了意外的分段响应')
+            cleanup_error = self._reset_partial()
+            if cleanup_error is not None:
+                raise cleanup_error
+            self.status_changed.emit('断点已失效，正在从头重新下载...')
+
     def _download_once(self, attempt):
         existing = self._partial_size()
         if self.expected_size and existing >= self.expected_size:
             existing = 0
-            self._reset_partial()
-        request = self._make_request(existing)
-        with _urlopen_with_proxy(request, timeout=self.DOWNLOAD_TIMEOUT) as response:
-            code = getattr(response, 'status', response.getcode())
-            resumed = existing > 0 and code == 206
-            if existing > 0 and code != 206:
-                self.status_changed.emit('服务器未接受断点续传，正在从头重新下载...')
-                existing = 0
-                resumed = False
-                self._reset_partial()
-            total = self.expected_size
+        response, existing, range_total = self._open_download(existing)
+        with response:
+            resumed = existing > 0
             content_length = int(response.headers.get('Content-Length') or 0)
-            if not total:
-                total = existing + content_length if content_length else 0
+            total = self.expected_size or range_total or content_length
             mode = 'ab' if resumed else 'wb'
             downloaded = existing if resumed else 0
             start_time = time.monotonic()
@@ -2449,11 +2497,8 @@ class UpdateDownloadThread(QThread):
                     pass
             if total and downloaded < total:
                 raise http.client.IncompleteRead(b'', total - downloaded)
-            if os.path.exists(self.save_path):
-                try:
-                    os.chmod(self.save_path, stat.S_IWRITE | stat.S_IREAD)
-                except OSError:
-                    pass
+            if total and downloaded > total:
+                raise UpdateDownloadIntegrityError(f'下载文件大小不匹配（期望 {total}，实际 {downloaded}）')
             # 内容完整性校验：与发布方 SHA-256 摘要比对（若提供），避免续传拼接/传输损坏交付坏文件
             if self.expected_sha256:
                 actual_sha256 = self._sha256_file(self.part_path)
@@ -2466,6 +2511,14 @@ class UpdateDownloadThread(QThread):
                     raise UpdateDownloadIntegrityError(
                         f'文件校验失败：期望 SHA-256 {self.expected_sha256[:16]}...，实际 {actual_sha256[:16]}...'
                     )
+            if self.isInterruptionRequested():
+                self.download_canceled.emit(self.part_path, downloaded)
+                return False
+            if os.path.exists(self.save_path):
+                try:
+                    os.chmod(self.save_path, stat.S_IWRITE | stat.S_IREAD)
+                except OSError:
+                    pass
             os.replace(self.part_path, self.save_path)
             self.progress_changed.emit(downloaded, total, 0.0, -1, resumed, attempt)
             self.download_completed.emit(self.save_path)
@@ -2524,7 +2577,8 @@ class UpdateDownloadThread(QThread):
         else:
             # 网络类失败保留 .part：与取消路径语义一致，下次下载同一地址自动断点续传，
             # 避免大文件在弱网下反复从头下载
-            message += f'\n已保留部分下载文件 {os.path.basename(self.part_path)}，重新下载时将自动续传'
+            if self._partial_size():
+                message += f'\n已保留部分下载文件 {os.path.basename(self.part_path)}，重新下载时将自动续传'
         self.download_failed.emit(message)
 
 
@@ -2572,6 +2626,87 @@ class ArchiveExtractThread(QThread):
             self._process = None
 
 
+class ArchivePreviewThread(QThread):
+    preview_ready = pyqtSignal(str)
+
+    def __init__(self, path, sevenzip, parent):
+        super().__init__(parent)
+        self.path = path
+        self.sevenzip = sevenzip
+
+    def run(self):
+        try:
+            text = self._read_preview()
+        except ArchiveExtractionCanceled:
+            return
+        except Exception as error:
+            text = f'压缩包预览错误：{error}'
+        if not self.isInterruptionRequested():
+            self.preview_ready.emit(text)
+
+    def _read_preview(self):
+        path = self.path
+        if self.sevenzip:
+            entries = _inspect_7z_archive(self.sevenzip, path, self.isInterruptionRequested)
+            count = len(entries)
+            files = [(item['name'], item['size'], item['is_dir'])
+                     for item in entries[:PREVIEW_ARCHIVE_MAX_ENTRIES]]
+        else:
+            import zipfile
+            with zipfile.ZipFile(path) as archive:
+                entries = archive.infolist()
+                count = len(entries)
+                files = [(_decode_zip_name(item.filename, item.flag_bits), item.file_size, item.is_dir())
+                         for item in entries[:PREVIEW_ARCHIVE_MAX_ENTRIES]]
+        info = f'压缩包：{os.path.basename(path)}\n条目数：{count}\n\n'
+        if count > len(files):
+            info += f'仅列出前 {len(files)} 项。\n\n'
+        tree = self._build_file_tree(files)
+        lines = []
+        remaining = PREVIEW_ARCHIVE_MAX_OUTPUT_CHARS
+        for line in self._tree_lines(tree):
+            if self.isInterruptionRequested():
+                raise ArchiveExtractionCanceled()
+            if len(line) > remaining:
+                lines.append('文件树过大，已截断显示。')
+                break
+            lines.append(line)
+            remaining -= len(line)
+        return info + ''.join(lines)
+
+    def _build_file_tree(self, files):
+        """构建文件树（使用元组列表格式）"""
+        tree = {}
+        for filename, size, is_dir in files:
+            path_parts = filename.replace('\\', '/').rstrip('/').split('/')
+            if len(path_parts) > ARCHIVE_MAX_DEPTH:
+                raise ArchiveSafetyError('压缩包目录层级过深')
+            current = tree
+            for i, part in enumerate(path_parts):
+                if not part:
+                    continue
+                if part not in current:
+                    current[part] = {'_type': 'dir', '_children': {}, '_size': 0}
+                if i == len(path_parts) - 1:
+                    if is_dir:
+                        current[part]['_type'] = 'dir'
+                    else:
+                        current[part] = {'_type': 'file', '_size': size, '_children': {}}
+                else:
+                    current = current[part]['_children']
+        return tree
+
+    def _tree_lines(self, tree, prefix=''):
+        for index, (name, node) in enumerate(tree.items(), 1):
+            last = index == len(tree)
+            branch = '└── ' if last else '├── '
+            if node['_type'] == 'dir':
+                yield f'{prefix}{branch}{name}/\n'
+                yield from self._tree_lines(node['_children'], prefix + ('    ' if last else '│   '))
+            else:
+                yield f'{prefix}{branch}{name} ({node["_size"] / 1024:.2f} KB)\n'
+
+
 class VideoFrameThread(QThread):
     """后台提取视频多帧缩略图，避免大视频解码卡住 UI 线程。
 
@@ -2585,8 +2720,12 @@ class VideoFrameThread(QThread):
         self.target_height = target_height
 
     def run(self):
-        images = self._capture_images(self.video_path, self.target_height)
-        self.frames_ready.emit(self.video_path, images)
+        try:
+            images = self._capture_images(self.video_path, self.target_height)
+        except Exception:
+            images = []
+        if not self.isInterruptionRequested():
+            self.frames_ready.emit(self.video_path, images)
 
     def _capture_images(self, path, target_height):
         if not HAS_OPENCV:
@@ -2598,9 +2737,8 @@ class VideoFrameThread(QThread):
             return []
         try:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0:
-                return []
-            for pos in VIDEO_PREVIEW_POSITIONS:
+            positions = VIDEO_PREVIEW_POSITIONS if total_frames > 0 else (0,)
+            for pos in positions:
                 if self.isInterruptionRequested():
                     break
                 frame_no = max(0, min(int(total_frames * pos), total_frames - 1))
@@ -2640,10 +2778,14 @@ class CheckUpdateThread(QThread):
                 },
             )
             with _urlopen_with_proxy(request, timeout=20) as response:
+                if self.isInterruptionRequested():
+                    return
                 data = json.loads(response.read().decode('utf-8'))
-            self.result_ready.emit(data)
+            if not self.isInterruptionRequested():
+                self.result_ready.emit(data)
         except Exception as e:
-            self.result_ready.emit(e)
+            if not self.isInterruptionRequested():
+                self.result_ready.emit(e)
 
 
 class FolderScanThread(QThread):
@@ -2668,7 +2810,7 @@ class FolderScanThread(QThread):
         if not directory_key or directory_key in self._scan_visited:
             return
         self._scan_visited.add(directory_key)
-        if self.isInterruptionRequested() or not os.path.exists(directory):
+        if self.isInterruptionRequested() or not os.path.isdir(directory) or _is_reparse_point(directory):
             return
         try:
             items = os.listdir(directory)
@@ -2750,7 +2892,7 @@ class FolderStatsThread(QThread):
         total = 0
         truncated = False
         traversal_error = None
-        if not os.path.isdir(self.root):
+        if not os.path.isdir(self.root) or _is_reparse_point(self.root):
             if not self.isInterruptionRequested():
                 self.stats_error.emit(self.token, f'目录不存在或不可访问: {self.root}')
             return
@@ -2767,9 +2909,12 @@ class FolderStatsThread(QThread):
                 for name in filenames:
                     if self.isInterruptionRequested():
                         return
+                    full = os.path.join(dirpath, name)
+                    if _is_reparse_point(full):
+                        continue
                     count += 1
                     try:
-                        total += os.path.getsize(os.path.join(dirpath, name))
+                        total += os.path.getsize(full)
                     except OSError:
                         pass
                     if count >= self.MAX_FILES:
@@ -2806,7 +2951,7 @@ class FileSearchThread(QThread):
         results = []
         truncated = False
         traversal_error = None
-        if not os.path.isdir(self.root):
+        if not os.path.isdir(self.root) or _is_reparse_point(self.root):
             if not self.isInterruptionRequested():
                 self.search_error.emit(self.token, f'目录不存在或不可访问: {self.root}')
             return
@@ -2829,6 +2974,8 @@ class FileSearchThread(QThread):
                     if self.name_filter and self.name_filter not in name.lower():
                         continue
                     full = os.path.join(dirpath, name)
+                    if _is_reparse_point(full):
+                        continue
                     try:
                         st_mtime = os.path.getmtime(full)
                         size = os.path.getsize(full)
@@ -2893,7 +3040,7 @@ class FolderLargestFilesThread(QThread):
         self.max_files = self.MAX_FILES if max_files is None else max_files
 
     def run(self):
-        if not os.path.isdir(self.root):
+        if not os.path.isdir(self.root) or _is_reparse_point(self.root):
             if not self.isInterruptionRequested():
                 self.result_error.emit(self.token, '目录不存在或不可访问: %s' % self.root)
             return
@@ -3206,23 +3353,25 @@ class NewProjectDialog(QDialog):
             return
         try:
             os.makedirs(target_path)
-            # 仅创建成功才记录默认新建目录并持久化（取消/失败不产生副作用）
-            if self.parent_window:
-                self.parent_window.default_new_project_folder = self.target_folder
-                settings = getattr(self.parent_window, 'settings', None) or []
-                if not any(_same_path(path, self.target_folder) for name, path in settings):
-                    folder_label = os.path.basename(self.target_folder) or "自定义路径"
-                    settings.append((folder_label, self.target_folder))
-                    self.parent_window.settings = settings
-                self.parent_window.save_settings_to_file(
-                    self.parent_window.settings,
-                    self.parent_window.include_subfolders,
-                    self.target_folder
-                )
-            QMessageBox.information(self, '成功', f'项目文件夹 {folder_name} 已创建')
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, '错误', f'创建文件夹失败: {str(e)}')
+        except OSError as error:
+            QMessageBox.critical(self, '错误', f'创建文件夹失败：{error}')
+            return
+        parent = self.parent_window
+        if parent is not None:
+            previous_folder = parent.default_new_project_folder
+            settings = list(parent.settings or [])
+            if not any(_same_path(path, self.target_folder) for _, path in settings):
+                folder_label = os.path.basename(self.target_folder) or '自定义路径'
+                settings.append((folder_label, self.target_folder))
+            if parent.save_settings_to_file(settings, parent.include_subfolders, self.target_folder):
+                parent.settings = settings
+            else:
+                parent.default_new_project_folder = previous_folder
+                QMessageBox.warning(self, '设置未保存', f'项目文件夹已创建：{target_path}')
+                self.accept()
+                return
+        QMessageBox.information(self, '成功', f'项目文件夹 {folder_name} 已创建')
+        self.accept()
             
     def get_project_info(self):
         prefix = 'S' if self.project_type == '主板' else 'M'
@@ -3464,6 +3613,7 @@ class NewStructureDialog(QDialog):
     def save_folder_structure(self):
         """保存文件夹结构设置到主窗口"""
         if self.parent_window:
+            previous = self.parent_window.folder_structure
             # 收集当前设置
             custom_folders = self._custom_folder_names()[0]
             
@@ -3475,11 +3625,12 @@ class NewStructureDialog(QDialog):
             }
             
             # 保存到文件
-            self.parent_window.save_settings_to_file(
+            if not self.parent_window.save_settings_to_file(
                 self.parent_window.settings,
                 self.parent_window.include_subfolders,
                 self.parent_window.default_new_project_folder
-            )
+            ):
+                self.parent_window.folder_structure = previous
     
     def reject(self):
         """重写取消方法：取消不保存设置（标题栏 X 与取消按钮语义一致）。"""
@@ -3595,7 +3746,7 @@ class SettingsDialog(_ReorderableTableDialog):
         self.sort_by_number_checkbox.setCheckable(True)
         self.sort_by_number_checkbox.setChecked(self.sort_by_number)
         
-        self.show_hidden_checkbox = QPushButton('显示隐藏文件（以.开头或系统隐藏属性）')
+        self.show_hidden_checkbox = QPushButton('显示带 Windows 隐藏属性的文件')
         self.show_hidden_checkbox.setCheckable(True)
         self.show_hidden_checkbox.setChecked(self.show_hidden)
         
@@ -4005,8 +4156,9 @@ class WizardDialog(QDialog):
             <p>在右侧文件树中<b>单击</b>文件即可在下方预览区查看内容，无需打开外部程序：</p>
             <ul>
             <li>文本 / PDF / Excel / Word / 图片 / 视频缩略图</li>
-            <li>压缩包（.zip/.rar/.7z）以树状结构显示内容；预览限制为最多 5000 项、输出最多 2 MiB</li>
+            <li>压缩包（.zip/.rar/.7z）以树状结构显示内容；预览限制为最多 5000 项、树文本约 200 万字符</li>
             </ul>
+            <p>如需预览或解压 <code>.rar</code> / <code>.7z</code>，请在 <b>设置 → 7-Zip路径设置</b> 中勾选启用，并指定官方 <code>7z.exe</code>。<code>.zip</code> 不受此开关影响。</p>
             <p><b>双击</b>文件用系统默认程序打开；切换到<b>元数据</b>标签可查看文件详情。</p>
             <p>对文件夹右键可选择<b>“在终端中打开”</b>，程序会优先尝试 Windows Terminal，
             再回退到 PowerShell / cmd。</p>
@@ -4022,7 +4174,8 @@ class WizardDialog(QDialog):
             <li><b>F2 / 右键重命名</b>：重命名单个文件</li>
             <li><b>右键保存版本</b>：为文件生成日期版本副本（如 S1200-10_20260708.dsn），按当前最大后缀继续递增</li>
             <li><b>右键归档到old文件夹</b>：将选中文件移入同目录下的 old/ 文件夹（自动创建），支持多选</li>
-            <li><b>右键在资源管理器中显示 / 复制路径</b>：打开资源管理器并选中该项，或复制完整/相对路径文本</li>
+            <li><b>右键在资源管理器中显示</b>：打开资源管理器并选中该项</li>
+            <li><b>编辑菜单 → 复制完整路径 / 复制相对路径</b>：复制为纯文本；项目列表右键另有「复制路径」</li>
             <li><b>Ctrl+Z / 撤回</b>：撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/</li>
             <li><b>占用分析</b>：列出当前项目最大的文件，双击即可在资源管理器中定位</li>
             <li>复制、保存版本和 ZIP 创建采用无覆盖提交；多选压缩会合并父子关系并排除输出 ZIP 自身</li>
@@ -4034,7 +4187,7 @@ class WizardDialog(QDialog):
         (
             '四、快捷访问与项目结构',
             '''
-            <p>快捷访问栏位于窗口顶部，适合放常用项目根目录、资料目录或网络目录。</p>
+            <p>快捷访问栏位于窗口顶部，适合放常用项目根目录、资料目录或网络目录。默认包含桌面、图片、系统下载文件夹，以及本机存在的 C: / D: / E: 盘根目录（磁盘根目录默认不在程序内预览）。</p>
             <ul>
             <li><b>+</b> 按钮 → 打开快捷访问设置</li>
             <li><b>右键快捷访问按钮</b> → 可在终端中打开、删除该快捷访问、或进入快捷访问设置</li>
@@ -4286,7 +4439,8 @@ class MainWindow(QMainWindow):
         self.file_tree.doubleClicked.connect(self.on_file_double_clicked)
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_tree.customContextMenuRequested.connect(self.on_file_tree_context_menu)
-        self.copy_shortcut = QShortcut(QKeySequence.Copy, self)
+        self.copy_shortcut = QShortcut(QKeySequence.Copy, self.file_tree)
+        self.copy_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.copy_shortcut.activated.connect(self.copy_selected_items)
         self.paste_shortcut = QShortcut(QKeySequence.Paste, self)
         self.paste_shortcut.activated.connect(self.paste_to_selected_target)
@@ -4652,10 +4806,14 @@ class MainWindow(QMainWindow):
             self.move_to_recycle(selected_paths[0])
 
     def _on_toggle_show_hidden(self, checked):
+        previous = self.show_hidden
         self.show_hidden = checked
-        self.save_settings_to_file(self.settings, self.include_subfolders)
+        if not self.save_settings_to_file(self.settings, self.include_subfolders):
+            self.show_hidden = previous
+            self.show_hidden_action.setChecked(previous)
+            return
+        self._apply_hidden_files_filter()
         if self.current_folder:
-            self._apply_hidden_files_filter()
             self.refresh_file_tree()
 
     def refresh_file_tree(self):
@@ -4946,14 +5104,12 @@ class MainWindow(QMainWindow):
                 while os.path.exists(bak):
                     bak = file_path + '.bak.' + time.strftime('%Y%m%d_%H%M%S') + f'.{seq}'
                     seq += 1
-                    if seq > 100:
-                        break
             try:
                 if sys.platform == 'win32':
                     ctypes.windll.kernel32.SetFileAttributesW(file_path, 0x80)
             except Exception:
                 pass
-            os.replace(file_path, bak)
+            os.rename(file_path, bak)
             return bak
         except Exception:
             return None
@@ -4995,20 +5151,28 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.settings, self.include_subfolders, self.sort_by_number, self, getattr(self, 'show_hidden', False), getattr(self, 'regex_state', 'default'), getattr(self, 'custom_mb_regex', ''), getattr(self, 'custom_db_regex', ''))
         if dialog.exec_():
             new_paths, new_include_subfolders, new_sort_by_number, new_show_hidden, new_regex_state, new_custom_mb_regex, new_custom_db_regex = dialog.get_settings()
-            self.sort_by_number = new_sort_by_number
-            self.show_hidden = new_show_hidden
-            self.regex_state = new_regex_state
-            self.custom_mb_regex = new_custom_mb_regex
-            self.custom_db_regex = new_custom_db_regex
+            changes = {
+                'sort_by_number': new_sort_by_number,
+                'show_hidden': new_show_hidden,
+                'regex_state': new_regex_state,
+                'custom_mb_regex': new_custom_mb_regex,
+                'custom_db_regex': new_custom_db_regex,
+            }
+            previous = {name: getattr(self, name) for name in changes}
+            for name, value in changes.items():
+                setattr(self, name, value)
             if self.save_settings_to_file(new_paths, new_include_subfolders):
                 self.settings = new_paths
                 self.include_subfolders = new_include_subfolders
                 QMessageBox.information(self, '成功', '设置已保存')
                 self.load_filtered_folders()
-                # 刷新文件树以应用隐藏文件设置
+                self.show_hidden_action.setChecked(self.show_hidden)
+                self._apply_hidden_files_filter()
                 if self.current_folder:
-                    self._apply_hidden_files_filter()
                     self.refresh_file_tree()
+            else:
+                for name, value in previous.items():
+                    setattr(self, name, value)
     
     def _apply_hidden_files_filter(self):
         """根据 show_hidden 设置更新文件模型过滤器。"""
@@ -5076,9 +5240,14 @@ class MainWindow(QMainWindow):
 
         dialog.setLayout(layout)
         if dialog.exec_():
+            previous = {}
             for key, cb in checkboxes.items():
-                setattr(self, f'preview_{key}_enabled', cb.isChecked())
-            self.save_settings_to_file(self.settings, self.include_subfolders)
+                name = f'preview_{key}_enabled'
+                previous[name] = getattr(self, name, True)
+                setattr(self, name, cb.isChecked())
+            if not self.save_settings_to_file(self.settings, self.include_subfolders):
+                for name, value in previous.items():
+                    setattr(self, name, value)
 
     def _create_quick_access_buttons(self, layout):
         for btn in list(self.quick_access_buttons):
@@ -5109,7 +5278,7 @@ class MainWindow(QMainWindow):
             # 避免 QPushButton.clicked 在第一次点击 release 即触发导致双击也会跑一次单击
             _single_shot = QTimer(btn)  # parent=btn,随按钮一起释放
             _single_shot.setSingleShot(True)
-            _single_shot.setInterval(250)
+            _single_shot.setInterval(QApplication.doubleClickInterval())
 
             if no_preview:
                 btn.setStyleSheet(
@@ -5181,8 +5350,8 @@ class MainWindow(QMainWindow):
     def _open_quick_access_external(self, path):
         try:
             path = _normalize_persisted_path(path)
-            if os.path.exists(path):
-                os.startfile(path)
+            if os.path.isdir(path):
+                self._open_with_shell(path)
             else:
                 QMessageBox.warning(self, '警告', f'路径不存在: {path}')
         except Exception as e:
@@ -5198,6 +5367,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f'路径不可用：{path}')
             return
         path = _normalize_persisted_path(path)
+        self._reset_preview()
+        self.metadata_tab.clear()
         self.current_folder = path
         self.file_model.setRootPath(path)
         self.file_tree.setRootIndex(self.file_model.index(path))
@@ -5379,11 +5550,7 @@ class MainWindow(QMainWindow):
         thread.result_ready.connect(self._on_largest_files_ready)
         thread.result_error.connect(self._on_largest_files_error)
 
-        def on_canceled():
-            thread.requestInterruption()
-            thread.quit()
-
-        progress.canceled.connect(on_canceled)
+        progress.canceled.connect(self._cancel_largest_files_job)
         thread.start()
         progress.show()
 
@@ -5458,6 +5625,9 @@ class MainWindow(QMainWindow):
                 new_path if _same_path(path, old_path) else path for path in hidden
             ]
             settings_changed = True
+        if _same_path(getattr(self, 'last_project_path', None), old_path):
+            self.last_project_path = new_path
+            settings_changed = True
         save_settings = getattr(self, 'save_settings_to_file', None)
         if settings_changed and callable(save_settings):
             save_settings(getattr(self, 'settings', None), getattr(self, 'include_subfolders', False))
@@ -5476,8 +5646,6 @@ class MainWindow(QMainWindow):
             rebuild = getattr(self, '_rebuild_breadcrumb', None)
             if callable(rebuild):
                 rebuild()
-        if _same_path(getattr(self, 'last_project_path', None), old_path):
-            self.last_project_path = new_path
 
     def undo_last_action(self):
         stack = list(getattr(self, '_undo_stack', None) or [])
@@ -5510,35 +5678,35 @@ class MainWindow(QMainWindow):
         if kind == 'rename':
             current = record.get('current')
             original = record.get('original')
-            possible, reason = _undo_rename_possible(current, original)
+            identity = record.get('identity')
+            possible, reason = _undo_rename_possible(current, original, identity)
             if not possible:
                 QMessageBox.warning(self, '无法撤回', '无法撤回%s：%s' % (label, reason))
-                retry = None
-                if _undo_retryable_path(current, original):
-                    retry = _make_undo_rename(current, original, label)
-                return False, retry
+                return False, record if original and _identity_matches(current, identity) else None
             _apply_undo_rename(current, original)
             retarget = getattr(self, '_retarget_persisted_path', None)
             if callable(retarget):
                 retarget(current, original)
             self.statusBar().showMessage('已撤回%s: %s' % (label, os.path.basename(original)))
             return True, None
+        identities = record.get('identities', {})
         if kind == 'move':
             done = 0
             errors = []
             retry_pairs = []
             for original, current in record.get('pairs') or []:
-                possible, reason = _undo_rename_possible(current, original)
+                identity = identities.get(current)
+                possible, reason = _undo_rename_possible(current, original, identity)
                 if not possible:
                     errors.append((current or original, reason))
-                    if _undo_retryable_path(current, original):
+                    if original and _identity_matches(current, identity):
                         retry_pairs.append((original, current))
                     continue
                 try:
                     os.rename(current, original)
                 except OSError as error:
                     errors.append((current or original, str(error)))
-                    if _undo_retryable_path(current, original):
+                    if original and _identity_matches(current, identity):
                         retry_pairs.append((original, current))
                     continue
                 done += 1
@@ -5554,7 +5722,7 @@ class MainWindow(QMainWindow):
                     '部分撤回失败' if done else '无法撤回',
                     details,
                 )
-            retry = _make_undo_move(retry_pairs, label) if retry_pairs else None
+            retry = dict(record, pairs=retry_pairs) if retry_pairs else None
             return done > 0, retry
         if kind == 'create':
             backend = _load_strict_recycle_backend()
@@ -5562,7 +5730,7 @@ class MainWindow(QMainWindow):
             def recycle_fn(path, _backend=backend):
                 _send_path_to_recycle_strict(path, backend=_backend)
 
-            successes, errors = _apply_undo_create_paths(record.get('paths') or [], recycle_fn)
+            successes, errors = _apply_undo_create_paths(record.get('paths') or [], recycle_fn, identities)
             if successes:
                 self.statusBar().showMessage(
                     '已撤回%s，%d 项已移入回收站' % (label, len(successes))
@@ -5579,9 +5747,9 @@ class MainWindow(QMainWindow):
                 )
             retry_paths = [
                 path for path, _message in errors
-                if path and os.path.lexists(path)
+                if _identity_matches(path, identities.get(path))
             ]
-            retry = _make_undo_create(retry_paths, label) if retry_paths else None
+            retry = dict(record, paths=retry_paths) if retry_paths else None
             return bool(successes), retry
         QMessageBox.warning(self, '无法撤回', '不支持撤回该操作')
         return False, None
@@ -5638,6 +5806,8 @@ class MainWindow(QMainWindow):
         source_key = _path_identity(source_path)
         if source_key in excluded_keys:
             return
+        if _is_reparse_point(source_path):
+            raise ValueError(f'不能将链接或重解析点打入压缩包：{source_path}')
         if os.path.isfile(source_path):
             arcname = os.path.relpath(source_path, base_dir).replace('\\', '/')
             if arcname in seen_arcnames:
@@ -5803,8 +5973,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '警告', '未找到该快捷访问项')
             return False
 
+        previous = self.quick_access_paths
         self.quick_access_paths = kept_paths
-        self.save_settings_to_file(self.settings, self.include_subfolders)
+        if not self.save_settings_to_file(self.settings, self.include_subfolders):
+            self.quick_access_paths = previous
+            return False
         self._refresh_quick_access_toolbar()
         self.statusBar().showMessage('已删除快捷访问')
         return True
@@ -5822,10 +5995,11 @@ class MainWindow(QMainWindow):
         """显示快捷访问设置对话框"""
         dialog = QuickAccessSettingsDialog(self.quick_access_paths, self)
         if dialog.exec_():
-            new_paths = dialog.get_settings()
-            self.quick_access_paths = new_paths
-            # 保存设置
-            self.save_settings_to_file(self.settings, self.include_subfolders)
+            previous = self.quick_access_paths
+            self.quick_access_paths = dialog.get_settings()
+            if not self.save_settings_to_file(self.settings, self.include_subfolders):
+                self.quick_access_paths = previous
+                return
             # 更新工具栏
             self._refresh_quick_access_toolbar()
             QMessageBox.information(self, '成功', '快捷访问设置已保存')
@@ -5838,30 +6012,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '错误', f'无法打开回收站: {str(e)}')
     
     def _defer_thread_cleanup(self, thread):
-        """Keep a running QThread alive until its finished signal fires."""
+        """Keep the thread alive and clean up its reference on the GUI thread."""
         if thread in self._zombie_threads:
             return
-
-        def _cleanup(t=thread):
-            try:
-                t.deleteLater()
-            except RuntimeError:
-                pass
-            try:
-                self._zombie_threads.remove(t)
-            except ValueError:
-                pass
-
-        try:
-            thread.finished.connect(_cleanup, Qt.DirectConnection)
-        except RuntimeError:
-            return
         self._zombie_threads.append(thread)
-        try:
-            if not thread.isRunning():
-                _cleanup()
-        except RuntimeError:
-            _cleanup()
+
+        def cleanup():
+            if thread in self._zombie_threads:
+                self._zombie_threads.remove(thread)
+                thread.deleteLater()
+
+        thread.finished.connect(cleanup, Qt.QueuedConnection)
+        if not thread.isRunning():
+            cleanup()
+
+
 
     def _safe_stop_thread(self, thread, timeout_ms=5000, wait=True):
         """Request interruption and optionally wait before deferred cleanup."""
@@ -5896,6 +6061,7 @@ class MainWindow(QMainWindow):
         self._closing_pending = False
         self._close_retry_count = getattr(self, '_close_retry_count', 0) + 1
         if self._close_retry_count > 30:
+            self._pending_update_command = None
             QMessageBox.warning(self, '退出', '后台任务长时间未结束，将强制退出。\n未完成的下载/扫描操作可能丢失。')
             os._exit(0)
         self.close()
@@ -5905,7 +6071,7 @@ class MainWindow(QMainWindow):
         # 若已有扫描线程在运行，先停止旧线程并断开其信号，避免旧结果回填到新一轮扫描，
         # 以及 QThread 仍在运行时被覆盖销毁触发警告
         old = getattr(self, 'scan_thread', None)
-        if old is not None and old.isRunning():
+        if old is not None:
             try:
                 old.scan_completed.disconnect(self.on_scan_completed)
                 old.scan_progress.disconnect(self.on_scan_progress)
@@ -5936,7 +6102,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """退出时确保后台线程已结束，避免 QThread 被销毁时仍在运行。
-        统一处理:disconnect 信号 → requestInterruption → quit → wait → deleteLater。"""
+        请求中断后通过定时器重试关闭，避免在窗口线程等待。"""
         running_extracts = [
             thread for thread in getattr(self, '_extract_jobs', {}) if thread.isRunning()
         ]
@@ -5959,8 +6125,7 @@ class MainWindow(QMainWindow):
                     try: getattr(update_thread, sig).disconnect()
                     except (TypeError, RuntimeError): pass
             except Exception: pass
-            if not self._safe_stop_thread(update_thread, 5000):
-                pending_threads.append('下载')
+            self._safe_stop_thread(update_thread, wait=False)
             self.update_download_thread = None
         # 其余线程统一处理
         _signal_map = {
@@ -5968,11 +6133,12 @@ class MainWindow(QMainWindow):
             '_search_thread': ('search_ready', 'search_error'),
             'scan_thread': ('scan_completed', 'scan_progress'),
             '_video_thumb_thread': ('frames_ready',),
+            '_archive_preview_thread': ('preview_ready',),
             '_check_update_thread': ('result_ready',),
             '_largest_files_thread': ('result_ready', 'result_error'),
         }
         self._close_largest_files_progress()
-        for attr in ('_stats_thread', '_search_thread', 'scan_thread', '_video_thumb_thread', '_check_update_thread', '_largest_files_thread'):
+        for attr in _signal_map:
             t = getattr(self, attr, None)
             if t is not None:
                 try:
@@ -5981,8 +6147,7 @@ class MainWindow(QMainWindow):
                         if sig is not None:
                             try: sig.disconnect()
                             except (TypeError, RuntimeError): pass
-                    if not self._safe_stop_thread(t, 2000):
-                        pending_threads.append(attr)
+                    self._safe_stop_thread(t, wait=False)
                 except Exception:
                     pass
                 if attr == 'scan_thread':
@@ -6021,6 +6186,15 @@ class MainWindow(QMainWindow):
             self.save_settings_to_file(self.settings, self.include_subfolders)
         except Exception:
             pass
+        command = getattr(self, '_pending_update_command', None)
+        if command is not None:
+            self._pending_update_command = None
+            try:
+                subprocess.Popen(command, cwd=os.path.dirname(command[0]), close_fds=True)
+            except OSError as error:
+                QMessageBox.warning(self, '更新失败', f'无法启动更新程序：\n{error}')
+                event.ignore()
+                return
         super().closeEvent(event)
 
     def changeEvent(self, event):
@@ -6038,11 +6212,13 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def on_scan_progress(self, message):
-        """处理扫描进度更新"""
-        self.statusBar().showMessage(message)
+        if self.sender() is self.scan_thread:
+            self.statusBar().showMessage(message)
     
     def on_scan_completed(self, motherboard_folders, daughterboard_folders):
-        """处理扫描完成信号"""
+        """只处理当前扫描的结果，忽略已经排队的旧信号。"""
+        if self.sender() is not self.scan_thread:
+            return
         # 清空现有表格数据
         self.motherboard_table.setRowCount(0)
         self.daughterboard_table.setRowCount(0)
@@ -6091,6 +6267,10 @@ class MainWindow(QMainWindow):
 
         # 首次扫描完成后尝试恢复上次打开的项目（仅一次，刷新不再触发）
         self._restore_last_project()
+        target = getattr(self, '_pending_project_selection', None)
+        self._pending_project_selection = None
+        if target:
+            self.locate_new_folder(target)
 
     def _restore_last_project(self):
         """扫描完成后恢复上次打开的项目。仅在首次扫描、且用户未抢先手动选行时执行。
@@ -6237,11 +6417,7 @@ class MainWindow(QMainWindow):
 
     def show_restore_hidden_projects_dialog(self):
         """恢复已隐藏的项目"""
-        hidden_folders = [path for path in self.hidden_folders if os.path.exists(path)]
-        missing_folders = [path for path in self.hidden_folders if not os.path.exists(path)]
-        if missing_folders:
-            self.hidden_folders = hidden_folders
-            self.save_settings_to_file(self.settings, self.include_subfolders)
+        hidden_folders = list(self.hidden_folders)
 
         if not hidden_folders:
             QMessageBox.information(self, '提示', '当前没有已隐藏项目')
@@ -6254,10 +6430,13 @@ class MainWindow(QMainWindow):
 
         index = labels.index(label)
         restored_path = hidden_folders[index]
-        self.hidden_folders = [path for path in self.hidden_folders if not _same_path(path, restored_path)]
-        self.save_settings_to_file(self.settings, self.include_subfolders)
+        previous = self.hidden_folders
+        self.hidden_folders = [path for path in previous if not _same_path(path, restored_path)]
+        if not self.save_settings_to_file(self.settings, self.include_subfolders):
+            self.hidden_folders = previous
+            return
+        self._pending_project_selection = restored_path
         self.load_filtered_folders()
-        self.locate_new_folder(restored_path)
         self.statusBar().showMessage(f"已恢复项目: {os.path.basename(restored_path)}")
 
     def _apply_pin_order(self, table):
@@ -6383,7 +6562,7 @@ class MainWindow(QMainWindow):
                     )
                 single_shot = QTimer(btn)
                 single_shot.setSingleShot(True)
-                single_shot.setInterval(250)
+                single_shot.setInterval(QApplication.doubleClickInterval())
                 single_shot.timeout.connect(lambda p=path: self._on_breadcrumb_clicked(p))
                 click_state = {'suppress_single': False}
 
@@ -6713,6 +6892,7 @@ class MainWindow(QMainWindow):
             if dialog.exec_():
                 new_comment = dialog.get_comment()
                 if new_comment != stored_comment:
+                    previous = self.comments
                     if new_comment:
                         self.comments = {
                             path: comment for path, comment in self.comments.items()
@@ -6725,12 +6905,11 @@ class MainWindow(QMainWindow):
                             path: comment for path, comment in self.comments.items()
                             if not _same_path(path, folder_path)
                         }
-                    # 保存注释
-                    self.save_comments()
-                    # 刷新文件夹列表
+                    if not self.save_comments():
+                        self.comments = previous
+                        return
+                    self._pending_project_selection = folder_path
                     self.load_filtered_folders()
-                    # 定位回原来的文件夹
-                    self.locate_new_folder(folder_path)
     
 
     
@@ -6896,13 +7075,11 @@ class MainWindow(QMainWindow):
         # 目标目录：若 target_path 是目录则用它，否则用其所在目录
         target_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
 
-        pasted = 0
         created = []
         errors = []
         for source in sources:
             try:
                 dest = self._paste_single(source, target_dir)
-                pasted += 1
                 if dest:
                     created.append(dest)
             except Exception as e:
@@ -6913,49 +7090,53 @@ class MainWindow(QMainWindow):
 
         if errors:
             QMessageBox.warning(self, "错误", "粘贴副本失败:\n" + "\n".join(errors))
-        if pasted == 1:
-            self.statusBar().showMessage(f"已粘贴副本: {os.path.basename(sources[0])}")
-        elif pasted > 1:
-            self.statusBar().showMessage(f"已粘贴 {pasted} 个副本")
+        if len(created) == 1:
+            self.statusBar().showMessage(f"已粘贴副本: {os.path.basename(created[0])}")
+        elif created:
+            self.statusBar().showMessage(f"已粘贴 {len(created)} 个副本")
 
     def _paste_single(self, source_path, target_dir):
-        """复制单个文件/文件夹到目标目录，处理重名"""
-        if os.path.isdir(source_path):
-            src_norm = os.path.normcase(os.path.normpath(os.path.abspath(source_path)))
-            tgt_norm = os.path.normcase(os.path.normpath(os.path.abspath(target_dir)))
-            if tgt_norm == src_norm or tgt_norm.startswith(src_norm + os.sep):
-                raise Exception(f'不能将文件夹复制到其自身或子目录中：{os.path.basename(source_path)}')
+        """复制单项；目录成功复制后才发布到最终路径。"""
+        if _is_reparse_point(source_path):
+            raise OSError('无法复制链接或重解析点')
+        is_directory = os.path.isdir(source_path)
+        if is_directory:
+            source_root = os.path.normcase(os.path.realpath(source_path))
+            target_root = os.path.normcase(os.path.realpath(target_dir))
+            if target_root == source_root or target_root.startswith(source_root.rstrip(os.sep) + os.sep):
+                raise ValueError('不能将文件夹复制到其自身或子目录中')
 
         base_name = os.path.basename(source_path)
-        dest = os.path.join(target_dir, base_name)
         name, ext = os.path.splitext(base_name)
-        match = re.search(r'_副本(\d+)$', name)
-        if match:
-            base_name_without_copy = name[:match.start()]
-            counter = int(match.group(1)) + 1
-        else:
-            base_name_without_copy = name
-            counter = 1
-        while os.path.exists(dest):
-            new_name = f'{base_name_without_copy}_副本{counter}{ext}'
-            dest = os.path.join(target_dir, new_name)
-            counter += 1
-            if counter > 100000:
-                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件") from None
+        suffix = re.search(r'_副本(\d+)$', name)
+        counter = int(suffix[1]) + 1 if suffix else 1
+        stem = name[:suffix.start()] if suffix else name
 
-        if os.path.isdir(source_path):
-            shutil.copytree(source_path, dest)
-            return dest
+        def commit_copy(staged=None):
+            dest = os.path.join(target_dir, base_name)
+            for retry in range(counter, counter + 100000):
+                if not os.path.lexists(dest):
+                    try:
+                        if staged is None:
+                            _copy_file_exclusive(source_path, dest)
+                        else:
+                            os.rename(staged, dest)
+                        return dest
+                    except FileExistsError:
+                        pass
+                dest = os.path.join(target_dir, f'{stem}_副本{retry}{ext}')
+            raise OSError('无法生成唯一的副本名称，请清理目标目录中的副本')
 
-        while True:
-            try:
-                _copy_file_exclusive(source_path, dest)
-                return dest
-            except FileExistsError:
-                dest = os.path.join(target_dir, f'{base_name_without_copy}_副本{counter}{ext}')
-                counter += 1
-                if counter > 100000:
-                    raise Exception(f"无法生成唯一的目标文件名(已尝试 {counter} 次),请清理目标目录中的 “副本” 文件") from None
+        if not is_directory:
+            return commit_copy()
+
+        def skip_reparse_points(folder, names):
+            return [name for name in names if _is_reparse_point(os.path.join(folder, name))]
+
+        with tempfile.TemporaryDirectory(prefix='.seavo-copy-', dir=target_dir) as staging:
+            staged = os.path.join(staging, 'copy')
+            shutil.copytree(source_path, staged, ignore=skip_reparse_points)
+            return commit_copy(staged)
 
 
     def save_file_version(self, file_path):
@@ -7326,13 +7507,13 @@ class MainWindow(QMainWindow):
     def archive_to_old_folder(self, file_paths):
         """将选中文件/文件夹移入各自目录下的 old 文件夹。
         支持跨目录多选，每个文件各自移入自己目录下的 old/。"""
+        moved_pairs = []
         try:
             if not file_paths:
                 return
             self._reset_preview()
             moved = 0
             skipped = []
-            moved_pairs = []
             for file_path in file_paths:
                 if not os.path.exists(file_path):
                     continue
@@ -7344,6 +7525,8 @@ class MainWindow(QMainWindow):
                     continue
                 target_dir = os.path.join(parent_dir, 'old')
                 os.makedirs(target_dir, exist_ok=True)
+                if _is_reparse_point(target_dir):
+                    raise OSError(f'归档目录是链接或重解析点：{target_dir}')
                 source_name = os.path.basename(file_path)
                 is_directory = os.path.isdir(file_path)
                 if is_directory:
@@ -7372,9 +7555,6 @@ class MainWindow(QMainWindow):
                 moved_pairs.append((file_path, moved_path))
             if moved:
                 self.statusBar().showMessage(f'已归档 {moved} 个项目到 old/')
-                push_undo = getattr(self, '_push_undo', None)
-                if callable(push_undo) and moved_pairs:
-                    push_undo(_make_undo_move(moved_pairs, '归档到 old/'))
             if skipped:
                 QMessageBox.information(
                     self,
@@ -7382,7 +7562,12 @@ class MainWindow(QMainWindow):
                     f'{len(skipped)} 个项目已在 old/ 目录中，已跳过。',
                 )
         except Exception as e:
-            QMessageBox.warning(self, '错误', f'归档失败: {str(e)}')
+            message = f'已归档 {len(moved_pairs)} 项，其余未归档：{e}'
+            QMessageBox.warning(self, '归档未完成', message)
+        finally:
+            push_undo = getattr(self, '_push_undo', None)
+            if moved_pairs and callable(push_undo):
+                push_undo(_make_undo_move(moved_pairs, '归档到 old/'))
 
     def move_to_recycle(self, file_path):
         """移入回收站"""
@@ -7393,9 +7578,9 @@ class MainWindow(QMainWindow):
         对 UNC 路径(//server/share 或 \\server\share),os.startfile 会报 WinError 2,
         改用 explorer.exe 直接打开。"""
         try:
-            if path.startswith('\\\\') or path.startswith('//'):
+            if _is_unc_path(path):
                 # UNC 路径:用 explorer 打开
-                subprocess.Popen(['explorer', path])
+                subprocess.Popen([_explorer_executable(), path])
             else:
                 # 使用 ShellExecuteW 更可靠，能正确处理无关联程序的情况
                 result = ctypes.windll.shell32.ShellExecuteW(None, 'open', path, None, None, 1)
@@ -7524,8 +7709,8 @@ class MainWindow(QMainWindow):
         dialog = NewProjectDialog(self, default_folder=default_folder)
         if dialog.exec_():
             project_info = dialog.get_project_info()
+            self._pending_project_selection = project_info['full_path']
             self.load_filtered_folders()
-            self.locate_new_folder(project_info['full_path'])
     
     def locate_new_folder(self, folder_path):
         folder_name = os.path.basename(folder_path)
@@ -7545,9 +7730,8 @@ class MainWindow(QMainWindow):
             if _same_path(row_path, folder_path):
                 table.selectRow(row)
                 table.scrollToItem(table.item(row, 0))
-                self.current_folder = folder_path
-                self.file_tree.setRootIndex(self.file_model.index(folder_path))
-                self.new_structure_btn.setEnabled(True)
+                self._select_project_path(folder_path)
+                self.last_project_path = folder_path
                 break
     
     def new_folder_structure(self):
@@ -7568,8 +7752,10 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, '警告', '请至少选择一个文件夹')
                     return
                 version_folder = os.path.join(self.current_folder, f'V{version}')
-                if not os.path.exists(version_folder):
-                    os.makedirs(version_folder)
+                os.makedirs(version_folder, exist_ok=True)
+                if _is_reparse_point(version_folder):
+                    QMessageBox.warning(self, '无法创建结构', '版本文件夹指向其他位置，请选择实际目录。')
+                    return
                 created = []
                 failed = []
                 for folder in all_folders:
@@ -7578,7 +7764,7 @@ class MainWindow(QMainWindow):
                         failed.append('%s（%s）' % (folder, _validate_windows_filename(str(folder).strip()) or '名称无效'))
                         continue
                     folder_path = os.path.join(version_folder, safe_name)
-                    if os.path.exists(folder_path):
+                    if os.path.isdir(folder_path):
                         continue
                     try:
                         os.makedirs(folder_path)
@@ -7685,7 +7871,7 @@ class MainWindow(QMainWindow):
             self.image_scroll_area.hide()
             self.preview_tab.setPlainText('正在生成视频缩略图...')
             old = getattr(self, '_video_thumb_thread', None)
-            if old is not None and old.isRunning():
+            if old is not None:
                 self._safe_stop_thread(old, wait=False)
             thread = VideoFrameThread(file_path, 96, self)
             self._video_thumb_thread = thread
@@ -7698,17 +7884,13 @@ class MainWindow(QMainWindow):
 
     def _on_video_frames_ready(self, video_path, images):
         """视频缩略图后台生成完成：拼接显示。过期结果（已切换文件）直接丢弃。"""
-        if video_path != getattr(self, 'current_video_path', None):
+        thread = self.sender()
+        if thread is not self._video_thumb_thread or video_path != self.current_video_path:
             return
-        if getattr(self, '_video_thumb_thread', None) is not None:
-            self._video_thumb_thread = None
+        self._video_thumb_thread = None
+        self._safe_stop_thread(thread, wait=False)
         try:
             frames = [QPixmap.fromImage(img) for img in images]
-            if not frames:
-                # fall back 到单帧
-                single = self.generate_video_thumbnail(video_path)
-                if single is not None:
-                    frames = [QPixmap.fromImage(single)]
             if frames:
                 self.preview_tab.hide()
                 self.image_scroll_area.show()
@@ -7740,82 +7922,28 @@ class MainWindow(QMainWindow):
             self.image_scroll_area.hide()
             self.preview_tab.setPlainText(f'视频预览错误: {str(e)}')
 
-    def _build_file_tree(self, files):
-        """构建文件树（使用元组列表格式）"""
-        tree = {}
-        for filename, size, is_dir in files:
-            path_parts = filename.replace('\\', '/').rstrip('/').split('/')
-            current = tree
-            for i, part in enumerate(path_parts):
-                if not part:
-                    continue
-                if part not in current:
-                    current[part] = {'_type': 'dir', '_children': {}, '_size': 0}
-                if i == len(path_parts) - 1:
-                    if is_dir:
-                        current[part]['_type'] = 'dir'
-                    else:
-                        current[part] = {'_type': 'file', '_size': size, '_children': {}}
-                else:
-                    current = current[part]['_children']
-        return tree
-
-    def _print_tree(self, tree, prefix='', is_last=True):
-        result = ''
-        items = list(tree.items())
-        for i, (name, node) in enumerate(items):
-            is_last_item = i == len(items) - 1
-            if node['_type'] == 'dir':
-                result += f'{prefix}{"└── " if is_last_item else "├── "}{name}/\n'
-                new_prefix = prefix + ("    " if is_last_item else "│   ")
-                result += self._print_tree(node['_children'], new_prefix, is_last_item)
-            else:
-                result += f'{prefix}{"└── " if is_last_item else "├── "}{name} ({node["_size"] / 1024:.2f} KB)\n'
-        return result
-
     def _preview_archive(self, file_path, ext):
-        if ext in ('.rar', '.7z') and not getattr(self, 'enable_7zip', False):
-            self._preview_7z_disabled_hint(file_path)
-            return
-        try:
-            archive_info = f'压缩包: {os.path.basename(file_path)}\n\n'
-            files_list = []
-            total_size = 0
-            truncated = False
-            if ext == '.zip':
-                import zipfile
-                with zipfile.ZipFile(file_path, 'r') as zf:
-                    for item in zf.infolist():
-                        if len(files_list) >= PREVIEW_ARCHIVE_MAX_ENTRIES:
-                            truncated = True
-                            break
-                        filename = _decode_zip_name(item.filename)
-                        files_list.append((filename, item.file_size, item.is_dir()))
-                        total_size += item.file_size
-            elif ext in ['.rar', '.7z']:
-                items = self._list_archive_with_7z(file_path)
-                for filename, size, is_dir in items:
-                    if len(files_list) >= PREVIEW_ARCHIVE_MAX_ENTRIES:
-                        truncated = True
-                        break
-                    files_list.append((filename, size, is_dir))
-                    total_size += size
+        sevenzip = None
+        if ext in ('.rar', '.7z'):
+            if not self.enable_7zip:
+                self._preview_7z_disabled_hint(file_path)
+                return
+            sevenzip = self._find_7z_tool()
+            if not sevenzip:
+                self.preview_tab.setPlainText('未找到 7-Zip')
+                return
+        self.preview_tab.setPlainText('正在读取压缩包...')
+        thread = ArchivePreviewThread(file_path, sevenzip, self)
+        self._archive_preview_thread = thread
+        thread.preview_ready.connect(self._on_archive_preview_ready)
+        thread.start()
 
-            file_tree = self._build_file_tree(files_list)
-            archive_info += f'文件总数: {len(files_list)}\n'
-            archive_info += f'总大小: {total_size / 1024:.2f} KB\n\n'
-            if truncated:
-                archive_info += '文件过多，仅显示前 ' + str(PREVIEW_ARCHIVE_MAX_ENTRIES) + ' 项，后续内容未列出。\n\n'
-            archive_info += '文件树结构:\n'
-            archive_info += '=' * 60 + '\n'
-            tree_text = self._print_tree(file_tree)
-            if len(tree_text) > PREVIEW_ARCHIVE_MAX_OUTPUT_CHARS:
-                tree_text = tree_text[:PREVIEW_ARCHIVE_MAX_OUTPUT_CHARS]
-                tree_text += '\n' + '文件树过大，已截断显示。'
-            archive_info += tree_text
-            self.preview_tab.setPlainText(archive_info)
-        except Exception as e:
-            self.preview_tab.setPlainText(f'压缩包预览错误: {str(e)}')
+    def _on_archive_preview_ready(self, text):
+        thread = self.sender()
+        if thread is self._archive_preview_thread:
+            self._archive_preview_thread = None
+            self._safe_stop_thread(thread, wait=False)
+            self.preview_tab.setPlainText(text)
 
     def _preview_excel(self, file_path, ext):
         if ext in ('.xlsx', '.xlsm'):
@@ -7828,11 +7956,12 @@ class MainWindow(QMainWindow):
                        else f'Excel文件: {os.path.basename(file_path)}\n\n')
             workbook = None
             try:
-                workbook = load_workbook(file_path, read_only=True, keep_vba=is_macro)
+                workbook = load_workbook(file_path, read_only=True, keep_vba=False)
                 for sheet_name in workbook.sheetnames[:PREVIEW_EXCEL_MAX_SHEETS]:
                     content += f'工作表: {sheet_name}\n'
                     worksheet = workbook[sheet_name]
-                    for row in worksheet.iter_rows(min_row=1, max_row=PREVIEW_EXCEL_MAX_ROWS, values_only=True):
+                    for row in worksheet.iter_rows(min_row=1, max_row=PREVIEW_EXCEL_MAX_ROWS,
+                                                   max_col=PREVIEW_EXCEL_MAX_COLUMNS, values_only=True):
                         content += '\t'.join(str(cell) if cell is not None else '' for cell in row[:PREVIEW_EXCEL_MAX_COLUMNS]) + '\n'
                     content += '\n'
             except Exception as e:
@@ -7891,10 +8020,13 @@ class MainWindow(QMainWindow):
             ole = None
             stream = None
             try:
+                if os.path.getsize(file_path) > 16 * 1024 * 1024:
+                    self.preview_tab.setPlainText(content + '文件较大，请用 Word 打开。')
+                    return
                 ole = olefile.OleFileIO(file_path)
                 if ole.exists('WordDocument'):
                     stream = ole.openstream('WordDocument')
-                    data = stream.read()
+                    data = stream.read(1024 * 1024)
                     text_parts = [chr(b) for b in data if 32 <= b < 127 or b in (10, 13, 9)]
                     text = ''.join(text_parts)
                     lines = [l.strip() for l in text.split('\n') if l.strip()]
@@ -7955,6 +8087,8 @@ class MainWindow(QMainWindow):
         """预览入口：若对应文件类型的预览被关闭，则只显示「显示预览」按钮，不立即读取文件。"""
         ext = os.path.splitext(file_path)[1].lower()
         key, type_name = self._preview_category(ext)
+        if os.path.basename(file_path) in TEXT_DOTFILES:
+            key, type_name = 'text', '文本'
         if key and not getattr(self, f'preview_{key}_enabled', True):
             self._show_preview_button(file_path, type_name)
             return
@@ -7982,6 +8116,11 @@ class MainWindow(QMainWindow):
     def _reset_preview(self):
         """恢复预览区域到文本视图并清空，隐藏按钮与图片区域。"""
         self._cancel_pending_preview()
+        for attr in ('_video_thumb_thread', '_archive_preview_thread'):
+            thread = getattr(self, attr, None)
+            if thread is not None:
+                setattr(self, attr, None)
+                self._safe_stop_thread(thread, wait=False)
         self._manual_preview_path = None
         self.current_image_path = None
         self.current_video_path = None
@@ -8006,7 +8145,7 @@ class MainWindow(QMainWindow):
 
             # 无扩展名的 dotfile 按文件名匹配
             base_name = os.path.basename(file_path)
-            if ext == '' and base_name in TEXT_DOTFILES:
+            if base_name in TEXT_DOTFILES:
                 self._preview_text(file_path)
             elif ext in text_exts:
                 self._preview_text(file_path)
@@ -8107,8 +8246,8 @@ class MainWindow(QMainWindow):
         return f'{base}_{version_part}.exe'
 
     def _get_download_default_dir(self):
-        downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
-        if os.path.isdir(downloads):
+        downloads = _get_downloads_directory()
+        if downloads and os.path.isdir(downloads):
             return downloads
         if getattr(self, 'app_dir', None) and os.path.isdir(self.app_dir):
             return self.app_dir
@@ -8243,14 +8382,13 @@ class MainWindow(QMainWindow):
             '--sha256', str(expected_sha256 or ''),
             '--relaunch',
         ]
-        try:
-            subprocess.Popen(command, cwd=os.path.dirname(downloaded_path), close_fds=True)
-        except OSError as error:
-            QMessageBox.warning(self, '更新失败', f'无法启动更新程序：\n{error}')
+        if any(thread.isRunning() for thread in self._extract_jobs):
+            QMessageBox.information(self, '稍后更新', '请等待当前解压完成，然后重新安装更新。')
             return False
+        self._pending_update_command = command
         self.statusBar().showMessage('正在退出并应用更新...')
-        self.close()
-        return True
+        closing = self.close()
+        return closing or self._pending_update_command is not None
 
     def _download_update_asset(self, url, save_path, asset_name='', expected_size=0, expected_sha256=''):
         progress = QProgressDialog('正在下载更新...', '取消', 0, 0, self)
@@ -8264,7 +8402,7 @@ class MainWindow(QMainWindow):
         # 清理之前的下载线程
         old_thread = getattr(self, 'update_download_thread', None)
         if old_thread is not None:
-            self._safe_stop_thread(old_thread, 2000)
+            self._safe_stop_thread(old_thread, wait=False)
         thread = UpdateDownloadThread(url, save_path, expected_size, expected_sha256, self)
         self.update_download_thread = thread
 
@@ -8282,13 +8420,6 @@ class MainWindow(QMainWindow):
             progress.setLabelText(text)
 
         def download_completed(path):
-            # 校验文件大小是否匹配
-            if expected_size > 0:
-                actual_size = os.path.getsize(path)
-                if actual_size != expected_size:
-                    result['error'] = f'下载文件大小不匹配（期望 {expected_size}，实际 {actual_size}）'
-                    progress.accept()
-                    return
             result['path'] = path
             progress.accept()
         def download_failed(message):
@@ -8314,9 +8445,6 @@ class MainWindow(QMainWindow):
         try:
             thread.start()
             progress.exec_()
-            if thread.isRunning():
-                thread.requestInterruption()
-                thread.wait(5000)
             if result['path'] and not result['canceled'] and not result['error']:
                 return result['path']
             if result['canceled']:
@@ -8332,7 +8460,7 @@ class MainWindow(QMainWindow):
                 except (TypeError, RuntimeError):
                     pass
             # 安全收尾：等待超时不销毁线程，由 _safe_stop_thread 挂入僵尸列表待 finished 后清理
-            self._safe_stop_thread(thread, 5000)
+            self._safe_stop_thread(thread, wait=False)
             if getattr(self, 'update_download_thread', None) is thread:
                 self.update_download_thread = None
 
@@ -8349,7 +8477,11 @@ class MainWindow(QMainWindow):
 
     def _on_update_check_ready(self, payload):
         """检查更新线程完成：网络异常或正常数据都在此继续处理（GUI 线程）。"""
+        thread = self.sender()
+        if thread is not self._check_update_thread:
+            return
         self._check_update_thread = None
+        self._safe_stop_thread(thread, wait=False)
         if isinstance(payload, Exception):
             if isinstance(payload, urllib.error.HTTPError):
                 self._ask_open_release_page(
@@ -8491,6 +8623,7 @@ class MainWindow(QMainWindow):
         about_text = (
             '<h3>SeavoExplorer - 主板项目文件浏览器</h3>'
             f'<p>版本 {APP_VERSION}</p>'
+            '<p>0.7.1 修复同名文件误撤回、目录副本残留、部分归档无法撤回和快捷访问保存误报。压缩包在后台预览，项目扫描完成后再定位，下载断点失效时会重新下载。</p>'
             '<p>0.7.0 修正默认「下载」快捷访问（不再指向用户主目录）、未启用时禁止解压 .rar/.7z、拒绝会逃出版本目录的自定义文件夹名，并按 Windows SDK 修正系统代理解析结构体；启动时会应用已保存的「显示隐藏文件」。0.6.10 修复双击快捷访问按钮反复打开资源管理器并卡死、不预览按钮慢速双击打开两次、双击后单击偶发失效，以及标签和占用分析入口双击重复触发；文档补充默认快捷访问说明。0.6.9 在「文件」和「设置」之间增加「编辑」菜单，文件树右键操作和撤回都放在这里；复制完整路径、复制相对路径只保留在编辑菜单。有快捷键的项只在名称后面显示按键。0.6.8 修复撤回未完成时可重试；'
             '并保留此前的占用分析、资源管理器选中、PAC/系统代理支持、无覆盖写入、ZIP 去重、更新回滚和正则风险检测。</p>'
             '<p>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”。</p>'
@@ -8553,7 +8686,7 @@ class MainWindow(QMainWindow):
 <li>检查更新和下载会使用 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>，并解析 Windows 系统代理、PAC/WPAD；网络地址只接受 HTTP/HTTPS。</li>
 <li>发现新版本时，若程序目录可写且发布资产提供 SHA-256 digest，可选择 <b>下载并更新</b>：程序退出后由新 EXE 等待旧进程结束、替换原 EXE 并重新启动；失败时保留 <code>.old</code> 备份。</li>
 <li>若程序目录不可写（例如 Program Files）或发布资产没有 digest，只能选择 <b>仅下载</b> 后手动替换。</li>
-<li>程序内下载会在后台进行，进度窗口显示下载量、速度和预计剩余时间；网络中断时会自动重试，已有临时文件时会尽量断点续传。</li>
+<li>程序内下载会在后台进行，进度窗口显示下载量、速度和预计剩余时间；网络中断时会自动重试，已有临时文件时会核对续传位置，断点失效则从头下载。</li>
 <li>取消或网络失败时会保留 <code>.part</code> 临时文件以便稍后续传（失败提示会说明）；下载内容校验失败时会清理临时文件。</li>
 <li>当前发布使用自签名证书，Windows 可能仍提示“未知发布者”；请核对发布页提供的 SHA-256 和 manifest。</li>
 <li>如果 GitHub 连接较慢或下载失败，可使用弹窗中的发布页链接，在浏览器中手动下载最新 <code>SeavoExplorer.exe</code>。</li>
@@ -8566,6 +8699,7 @@ class MainWindow(QMainWindow):
 <ul>
 <li><b>包含子文件夹</b>：递归扫描根目录下面的子目录，适合项目按客户/年份分层存放的场景</li>
 <li><b>按编号排序</b>：忽略来源目录分组，所有项目统一按编号大小排序；不勾选时先按根目录添加顺序分组，组内再按编号排序</li>
+<li><b>显示隐藏文件</b>：菜单 <b>设置 → 显示隐藏文件</b>，或在项目文件夹设置中勾选。勾选后文件树显示带 Windows 隐藏属性的项；仅文件名以 <code>.</code> 开头、未设隐藏属性的文件，关闭该选项时通常仍可见</li>
 <li><b>刷新</b>：按 <b>F5</b> 或重新打开设置后确认，可重新扫描项目与文件树</li>
 </ul>
 
@@ -8598,15 +8732,14 @@ class MainWindow(QMainWindow):
 <p>选中<b>单个</b>文件/文件夹时：</p>
 <ul>
 <li><b>复制</b>：复制到剪贴板，既可在资源管理器中粘贴，也可用程序内"粘贴副本"</li>
-<li><b>粘贴副本</b>：把程序内或资源管理器剪贴板中的本地文件/文件夹复制到当前位置，自动处理重名（追加 <code>_副本N</code>），使用独占临时文件和无覆盖提交</li>
+<li><b>粘贴副本</b>：把程序内或资源管理器剪贴板中的本地文件/文件夹复制到当前位置，自动处理重名（追加 <code>_副本N</code>）。目录先复制到临时目录，跳过内部的链接和重解析点，完成后才提交</li>
 <li><b>重命名</b>：重命名文件或文件夹（也可按 <b>F2</b>）</li>
 <li><b>保存版本</b>：为文件生成日期版本副本（如 <code>S1200-10_20260708.dsn</code>），当天多次保存按当前最大后缀继续递增（a/b/c...，字母用完后自动续接 aa/ab/...），不会回填缺失的旧后缀，也不会覆盖已有版本</li>
 <li><b>归档到old文件夹</b>：将文件移入同目录下的 <code>old/</code> 文件夹（自动创建），支持多选</li>
-<li><b>显示隐藏文件</b>：菜单 <b>设置 → 显示隐藏文件</b>（可勾选开关），勾选后在文件树中显示以 <code>.</code> 开头的文件和系统隐藏属性的文件</li>
 <li><b>添加到zip压缩包</b>：压缩为同名 <code>.zip</code> 文件</li>
 <li><b>智能解压</b>：仅对 <code>.zip</code>、<code>.rar</code>、<code>.7z</code> 显示</li>
 <li><b>移入回收站</b>：移入系统回收站，避免直接永久删除</li>
-<li><b>撤回</b>：位于菜单 <b>编辑</b>，快捷键显示在名称后面（Ctrl+Z）。撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。撤回创建类操作会把新文件移入回收站，不会永久删除；原位置被占用时拒绝覆盖，未完成的撤回会保留并可再次尝试。移入回收站本身请到系统回收站还原</li>
+<li><b>撤回</b>：位于菜单 <b>编辑</b>，快捷键显示在名称后面（Ctrl+Z）。撤回最近一次重命名、粘贴副本、保存版本、创建压缩包或归档到 old/。撤回创建类操作会把新文件移入回收站，不会永久删除；原位置被占用时拒绝覆盖，仍为原文件的项目可在排除故障后重试。原路径已有同名替换文件时会跳过该项。移入回收站本身请到系统回收站还原</li>
 <li><b>在终端中打开</b>：仅文件夹显示；优先用 Windows Terminal 打开，失败后回退到 PowerShell / cmd，并始终定位到所选路径</li>
 <li><b>在资源管理器中显示</b>：打开资源管理器并选中该文件/文件夹（不是只打开所在目录）</li>
 <li><b>复制完整路径 / 复制相对路径</b>：只在菜单 <b>编辑</b> 中，右键菜单不再显示。复制为纯文本，便于粘贴到聊天或文档；不会改写“粘贴副本”用的文件剪贴板。多选时以换行拼接</li>
@@ -8626,17 +8759,17 @@ class MainWindow(QMainWindow):
 <p>单击文件树中的文件，下方预览区会自动显示内容：</p>
 <table border="1" cellpadding="4" cellspacing="0" style="border-collapse: collapse;">
 <tr style="background: #ecf0f1;"><th>文件类型</th><th>支持格式</th><th>说明</th></tr>
-<tr><td>文本文件</td><td>.txt .csv .log .bom .drc .rep .rpt .md .json .xml .html .htm .ini .cfg</td><td>直接显示文本（UTF-8/GBK 自动识别，支持 BOM）</td></tr>
+<tr><td>文本文件</td><td>.txt .csv .log .bom .drc .rep .rpt .md .json .xml .html .htm .ini .cfg .py .spec .toml .yaml .yml</td><td>直接显示文本（UTF-8/GBK 自动识别，支持 BOM）。无扩展名的 .gitignore、.dockerignore、.editorconfig、.env.example、.gitattributes 按文件名走文本预览</td></tr>
 <tr><td>PDF 文件</td><td>.pdf</td><td>预览前 3 页文本</td></tr>
-<tr><td>Excel 文件</td><td>.xlsx .xlsm .xls</td><td>表格形式预览（最多 20 个工作表、每表 10 行和 64 列）</td></tr>
+<tr><td>Excel 文件</td><td>.xlsx .xlsm .xls</td><td>表格形式预览（最多 20 个工作表、每表 10 行和前 64 列）</td></tr>
 <tr><td>Word 文件</td><td>.docx .doc</td><td>文档内容预览</td></tr>
-<tr><td>图片文件</td><td>.jpg .jpeg .png .bmp .gif .tiff .tif .webp .svg</td><td>缩略图预览，点击查看大图</td></tr>
+<tr><td>图片文件</td><td>.jpg .jpeg .png .bmp .gif .tiff .tif .webp .svg .ico .jfif</td><td>缩略图预览，点击查看大图</td></tr>
 <tr><td>视频文件</td><td>.mp4 .avi .mov .mkv .flv .wmv .m4v .webm .mpg .mpeg .3gp</td><td>5 帧截图预览(10%/30%/50%/70%/90%)，点击放大后可逐帧切换(方向键/按钮)</td></tr>
-<tr><td>压缩包</td><td>.zip .rar .7z</td><td>树状结构显示内容（最多 5000 项，输出最多 2 MiB）</td></tr>
+<tr><td>压缩包</td><td>.zip .rar .7z</td><td>树状结构显示内容（最多 5000 项；树文本约 200 万字符）</td></tr>
 </table>
 <p style="color: #7f8c8d;">加密工程文件（.opj .dsn .sch .brd .dbk .dsnlck）无法预览，会显示提示信息而非二进制内容；请用对应 EDA 软件打开。</p>
 <p><b>预览开关（降低卡顿）：</b>菜单 <b>设置 → 预览设置</b> 可按类型分别开关自动预览（文本/PDF/图片/视频/压缩包/表格/文档）。关闭某类后，点击该类文件不会立即读取，预览区改为显示一个 <b>显示预览</b> 按钮，需手动点击才加载——适合大文件或慢速磁盘。各类开关会被记住。</p>
-<p>为避免大列表或大表格长时间占用界面，压缩包预览最多列出 5000 项、输出最多 2 MiB；Excel 预览最多显示 20 个工作表、每表 10 行和 64 列。</p>
+<p>压缩包在后台读取，预览最多列出 5000 项，树文本约 200 万字符后截断；Excel 预览最多显示 20 个工作表、每表 10 行和前 64 列。</p>
 
 <h3 style="color: #2980b9;">六、压缩包操作</h3>
 <p><b>1. 智能解压</b></p>
@@ -9092,7 +9225,14 @@ def _replace_executable(target, source, retries=5):
             if kernel32.ReplaceFileW(target, new_path, backup_path, 0x1, None, None):
                 return True, ''
             last_error = 'ReplaceFileW 失败（错误码 %s）' % kernel32.GetLastError()
-            if os.path.exists(backup_path) and os.path.exists(target):
+            if not os.path.exists(target):
+                if os.path.isfile(backup_path):
+                    try:
+                        os.rename(backup_path, target)
+                    except OSError as error:
+                        return False, f'{last_error}，恢复原程序失败：{error}。备份：{backup_path}，更新文件：{new_path}'
+                return False, f'{last_error}。请检查原程序位置：{target}，更新文件：{new_path}'
+            if os.path.exists(backup_path):
                 backup_path = _unique_backup_path(target)
         if not backup_path:
             backup_path = _unique_backup_path(target)
@@ -9166,14 +9306,14 @@ def _run_update_mode(argv):
     if not os.path.isfile(target):
         _show_update_error('目标文件不存在：%s' % target, args.silent)
         return 1
-    if args.sha256:
-        actual = _file_sha256(source)
-        if actual.upper() != args.sha256.strip().upper():
-            _show_update_error(
-                '更新文件 SHA-256 校验失败：期望 %s，实际 %s' % (args.sha256, actual),
-                args.silent,
-            )
-            return 1
+    expected_sha256 = args.sha256.strip().upper()
+    if args.pid <= 0 or not re.fullmatch(r'[0-9A-F]{64}', expected_sha256):
+        _show_update_error('缺少有效的更新校验摘要或原程序进程号', args.silent)
+        return 1
+    actual = _file_sha256(source)
+    if actual != expected_sha256:
+        _show_update_error('更新文件 SHA-256 校验失败', args.silent)
+        return 1
     if not _wait_for_process_exit(args.pid, args.wait_timeout):
         _show_update_error('等待旧进程退出超时（PID %s）' % args.pid, args.silent)
         return 1

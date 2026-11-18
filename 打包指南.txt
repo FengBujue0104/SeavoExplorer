@@ -85,10 +85,10 @@ python -m venv .venv-build
 2. 核对 `main.py`、`pyproject.toml`、README 版本一致，以及两份图标完整。
 3. 检查所有顶层 Python 文件的 Python 3.8 grammar。
 4. 在清除 `PYTHONPATH`、`PYTHONHOME` 和外部 Qt 路径的环境中运行 `py_compile`、setuptools `pyproject.toml` 校验，再运行 `git diff --check`。
-5. 在同一净化环境中运行 `python -m unittest -q test_safety.py test_tooling.py`（当前共 168 项）。
+5. 在同一净化环境中运行 `python -m unittest -q test_safety.py test_tooling.py`（当前共 185 项）。
 6. 以净化后的 PATH 调用 `python -m PyInstaller --noconfirm --clean main.spec`。
 7. 审计 `Analysis-00.toc`：二进制来源只允许仓库、当前 Python 和 Windows 系统目录，避免 MiKTeX 等全局 PATH 中的 DLL 混入。
-8. 把 EXE 复制到临时目录，以净化 PATH 和 Qt offscreen 模式做 6 秒隔离启动冒烟；结束时终止完整 PyInstaller 进程树，不会读取真实 sidecar 配置，也不会借用宿主机的外部 Qt 插件或 DLL 路径。
+8. 把 EXE 复制到临时目录，以净化 PATH 和 Qt offscreen 模式做 6 秒隔离启动冒烟；结束时按隔离目录定位并终止冒烟进程，不会读取真实 sidecar 配置，也不会借用宿主机的外部 Qt 插件或 DLL 路径。
 9. 生成 SHA-256 和绑定 commit/dirty/严格环境/完整输入哈希/检查结果的 build manifest；诊断模式产物不能用于 Release。
 
 输出：
@@ -133,7 +133,7 @@ dist/SeavoExplorer/
 - `main.spec` 固定 `upx=False`，避免未来 PATH 中偶然出现 UPX 后改变产物和杀软表现。
 - `.rar` / `.7z` 依赖用户安装并授权的外部可信 `7z.exe`，不会打入 EXE；ZIP 使用 Python 标准库。
 - manifest 的 `code_signing` 记录签名模式、主体、指纹和验证状态；未签名时 `mode=none`。
-- 当前 0.6.1 使用自签名证书进行 Authenticode 签名，但证书未受公共信任；其他电脑仍可能显示 SmartScreen“未知发布者”。版本资源和 SHA-256 不能替代可信代码签名。
+- 当前发布（0.7.0）使用自签名证书进行 Authenticode 签名，但证书未受公共信任；其他电脑仍可能显示 SmartScreen“未知发布者”。版本资源和 SHA-256 不能替代可信代码签名。
 
 ## 6. 发布前准备
 
@@ -157,15 +157,15 @@ git rev-list --left-right --count origin/main...HEAD
 
 要求：当前是 `main`、工作区完全干净、最后一条输出为 `0  0`，且 `origin` 指向 `FengBujue0104/SeavoExplorer`。
 
-### 代码签名（自签名；当前 0.6.1 使用）
+### 代码签名（自签名；当前 0.7.0 使用）
 
 1. 生成自签名证书（`.signing/` 已加入 `.gitignore`，私钥不要提交）：
 
 ```powershell
-.\make_self_signed_cert.ps1 -PfxPassword "<PFX密码>"
+.\make_self_signed_cert.ps1
 ```
 
-脚本会输出证书指纹，并生成 `SeavoExplorer-dev.cer` / `SeavoExplorer-dev.pfx`。
+脚本会输出指纹并生成 `SeavoExplorer-dev.cer`。使用证书存储签名时无需导出 PFX。遇到同名导出文件时脚本会停止。可用 `-OutputDir` 指定新的导出目录。
 
 2. 用证书存储模式签名并构建：
 
@@ -186,7 +186,7 @@ signtool verify /pa /all /v .\dist\SeavoExplorer.exe
 
 - `Status=Valid`：当前机器信任该证书。
 - `Status=UnknownError` / `NotTrusted`：签名已存在，但证书未受信任；自签名在其他电脑上会这样。
-- 当前 0.6.1 发布使用 `SEAVO_SIGN_ALLOW_UNTRUSTED=1`；它只表示“允许未受信任的自签名证书”，不会让 Windows 信任发布者。正式发布应使用公共可信证书并设为 `0`。
+- 当前 0.7.0 发布使用 `SEAVO_SIGN_ALLOW_UNTRUSTED=1`；它只表示“允许未受信任的自签名证书”，不会让 Windows 信任发布者。正式发布应使用公共可信证书并设为 `0`。
 
 4. 发布门禁（可选）：
 
@@ -200,7 +200,7 @@ $env:SEAVO_REQUIRE_SIGNING="1"
 
 需要 GitHub CLI 2.94.0 或更高版本，并先执行 `gh auth login`。发布脚本必须用上述严格构建 venv 的 Python 运行。
 
-已发布版本不可重复发布；本次发布使用 `v0.7.0`：
+已发布版本不可重复发布。新版本使用对应的 `vX.Y.Z`（须等于 `APP_VERSION`）：
 
 ```powershell
 .\.venv-build\Scripts\python.exe release.py vX.Y.Z
@@ -210,7 +210,7 @@ $env:SEAVO_REQUIRE_SIGNING="1"
 
 1. 检查 `gh` 已登录、版本等于 `APP_VERSION`、clean main 与 `origin/main` 完全一致。
 2. 默认重新运行正式 onefile 构建，并再次验证 HEAD/远端/工作区没有变化。
-3. 只接受 commit、版本、dirty=false、严格依赖、全部检查、输入哈希、EXE 大小和 SHA-256 全部匹配的 manifest。
+3. 只接受 commit、版本、dirty=false、严格依赖、全部检查、输入哈希、EXE 大小和 SHA-256 全部匹配的 manifest，并重新读取实际 Authenticode 签名与清单对照。
 4. 冻结三份本地资产快照，再要求输入完整版本号确认，防止等待期间被其他构建替换。
 5. 创建带 commit 和 EXE SHA-256 的 annotated tag 并推送。
 6. 先创建 GitHub draft，只允许 EXE、`.sha256`、`.build.json` 三个资产，并逐个核对固定大小和 GitHub SHA-256 digest。

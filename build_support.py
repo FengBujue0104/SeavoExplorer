@@ -238,6 +238,7 @@ def signature_info(path):
     result = run_command(
         [_powershell_executable(), '-NoProfile', '-NonInteractive', '-Command', script],
         capture=True,
+        timeout=60,
     )
     try:
         info = json.loads(result.stdout or '{}')
@@ -289,7 +290,7 @@ def sign_executable(path, config=None):
     })
     if not config['signed']:
         raise BuildError('签名后未检测到 Authenticode 签名：{}'.format(path))
-    if not config['verified'] and not config['allow_untrusted']:
+    if config['status'] == 'HashMismatch' or (not config['verified'] and not config['allow_untrusted']):
         raise BuildError('Authenticode 签名验证失败（{}）：{}'.format(config['status'], path))
     return config
 
@@ -301,6 +302,19 @@ def sign_distribution_entrypoint(entrypoint):
         return config
     print('[签名] 模式：{}'.format(config['mode']), flush=True)
     return sign_executable(entrypoint, config)
+
+
+PUBLIC_CODE_SIGNING_KEYS = frozenset((
+    'mode',
+    'signed',
+    'verified',
+    'trusted',
+    'self_signed',
+    'subject',
+    'thumbprint',
+    'status',
+    'timestamp_subject',
+))
 
 
 def public_signing_manifest(config):
@@ -326,10 +340,23 @@ def public_signing_manifest(config):
     }
 
 
+def _normalize_thumbprint(value):
+    return str(value or '').replace(' ', '').upper()
+
+
 def validate_code_signing(code_signing, require_signed=None, allow_untrusted=None):
-    """校验 manifest.code_signing 是否符合发布策略。"""
+    """校验 manifest.code_signing 是否符合现行发布策略。
+
+    默认不强制签名（SEAVO_REQUIRE_SIGNING 未设置时允许 mode=none）。
+    自签名未受公共信任时需 SEAVO_SIGN_ALLOW_UNTRUSTED=1。本函数不改变该默认政策。
+    """
     if not isinstance(code_signing, dict):
         raise BuildError('manifest.code_signing 必须是 JSON object')
+    unknown = sorted(set(code_signing) - PUBLIC_CODE_SIGNING_KEYS)
+    if unknown:
+        raise BuildError(
+            'manifest.code_signing 含未公开字段：{}'.format(', '.join(unknown))
+        )
     mode = code_signing.get('mode')
     if mode not in ('none', 'store', 'pfx'):
         raise BuildError('manifest.code_signing.mode 非法：{}'.format(mode))
@@ -347,6 +374,24 @@ def validate_code_signing(code_signing, require_signed=None, allow_untrusted=Non
         raise BuildError('manifest.code_signing.verified 不是 true，且未允许未受信任证书')
 
 
+def validate_code_signing_matches_artifact(code_signing, artifact_path):
+    """核对清单中的公开字段与 EXE 的实际 Authenticode 签名。"""
+    validate_code_signing(code_signing)
+    expected = public_signing_manifest(code_signing)
+    info = signature_info(artifact_path)
+    if info['status'] == 'HashMismatch':
+        raise BuildError('EXE 的 Authenticode 摘要与内容不匹配')
+    valid = info['status'] == 'Valid'
+    actual = public_signing_manifest(dict(
+        info, mode=expected['mode'], signed=bool(info['subject']), verified=valid, trusted=valid,
+    ))
+    for fields in (expected, actual):
+        fields['thumbprint'] = _normalize_thumbprint(fields['thumbprint'])
+    mismatches = [key for key in expected if expected[key] != actual[key]]
+    if mismatches:
+        raise BuildError('manifest.code_signing 与 EXE 实际签名不一致：' + '、'.join(mismatches))
+
+
 def _display_command(command):
     try:
         return subprocess.list2cmdline(command)
@@ -354,18 +399,22 @@ def _display_command(command):
         return ' '.join(str(part) for part in command)
 
 
-def run_command(command, *, capture=False, check=True, env=None, cwd=ROOT_DIR, display_command=None):
+def run_command(command, *, capture=False, check=True, env=None, cwd=ROOT_DIR, display_command=None, timeout=None):
     shown_command = display_command if display_command is not None else _display_command(command)
     print('>', shown_command, flush=True)
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        env=env,
-        capture_output=capture,
-        text=capture,
-        encoding='utf-8' if capture else None,
-        errors='replace' if capture else None,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            capture_output=capture,
+            text=capture,
+            encoding='utf-8' if capture else None,
+            errors='replace' if capture else None,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise BuildError('命令超时（{} 秒）：{}'.format(timeout, shown_command)) from error
     if check and result.returncode != 0:
         details = ''
         if capture:
@@ -1378,7 +1427,7 @@ def validate_release_artifacts(expected_version, expected_commit, require_clean=
     if require_clean and source.get('dirty') is not False:
         mismatches.append('manifest 显示构建时工作区不是干净状态')
     try:
-        validate_code_signing(code_signing)
+        validate_code_signing_matches_artifact(code_signing, artifact_path)
     except BuildError as error:
         mismatches.append(str(error))
 
