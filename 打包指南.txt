@@ -24,6 +24,8 @@ v0.6.10（2026-10-21）已发布：annotated tag `v0.6.10`（tag object `671a0b7
 
 v0.7.0（2026-10-26）已发布：annotated tag `v0.7.0`（tag object `9d8d20d9b1cd2888f8252f147f4aa340a17e80a5`）指向 `edad0c3b3f6e903040e327d2665e270a530583a5`，EXE 96,998,216 bytes，SHA-256 `CC574C4A007727B67DAC8CFB2B89300721E357F8A083837009BA4D58996A7469`；使用自签名证书，远端三资产 digest 已核对。本版修正默认下载目录、未启用时的 rar/7z 解压、版本目录名逃逸、WinHTTP 代理结构体，并在启动时应用隐藏文件设置。
 
+v0.7.1（2026-11-18）已正式发布。annotated tag `v0.7.1`（tag object `4e681b30ca451ba0f568c6c6a6630652eb24a919`）指向 `bd135c2c5bc908198858761c9c45e43a5b505656`。EXE 为 97,003,136 字节，SHA-256 为 `B4DA31B9AEA5A2A0284F34323260FC42E915194CF9318DA1C3A3BC3281F6195A`。构建使用带时间戳的自签名证书，远端三个附件的大小和摘要均已核对。
+
 ## 1. 已验证基线
 
 2026-07-10 的 v0.5.0/v0.5.1 构建环境：
@@ -133,7 +135,7 @@ dist/SeavoExplorer/
 - `main.spec` 固定 `upx=False`，避免未来 PATH 中偶然出现 UPX 后改变产物和杀软表现。
 - `.rar` / `.7z` 依赖用户安装并授权的外部可信 `7z.exe`，不会打入 EXE；ZIP 使用 Python 标准库。
 - manifest 的 `code_signing` 记录签名模式、主体、指纹和验证状态；未签名时 `mode=none`。
-- 当前发布（0.7.0）使用自签名证书进行 Authenticode 签名，但证书未受公共信任；其他电脑仍可能显示 SmartScreen“未知发布者”。版本资源和 SHA-256 不能替代可信代码签名。
+- 当前发布（0.7.1）使用自签名证书进行 Authenticode 签名，但证书未受公共信任；其他电脑仍可能显示 SmartScreen“未知发布者”。版本资源和 SHA-256 不能替代可信代码签名。
 
 ## 6. 发布前准备
 
@@ -157,7 +159,7 @@ git rev-list --left-right --count origin/main...HEAD
 
 要求：当前是 `main`、工作区完全干净、最后一条输出为 `0  0`，且 `origin` 指向 `FengBujue0104/SeavoExplorer`。
 
-### 代码签名（自签名；当前 0.7.0 使用）
+### 代码签名（v0.7.1 使用自签名证书）
 
 1. 生成自签名证书（`.signing/` 已加入 `.gitignore`，私钥不要提交）：
 
@@ -186,7 +188,7 @@ signtool verify /pa /all /v .\dist\SeavoExplorer.exe
 
 - `Status=Valid`：当前机器信任该证书。
 - `Status=UnknownError` / `NotTrusted`：签名已存在，但证书未受信任；自签名在其他电脑上会这样。
-- 当前 0.7.0 发布使用 `SEAVO_SIGN_ALLOW_UNTRUSTED=1`；它只表示“允许未受信任的自签名证书”，不会让 Windows 信任发布者。正式发布应使用公共可信证书并设为 `0`。
+- v0.7.1 发布使用 `SEAVO_SIGN_ALLOW_UNTRUSTED=1` 允许未受信任的自签名证书。发布到公共信任环境时使用受信任证书，并将该值设为 `0`。
 
 4. 发布门禁（可选）：
 

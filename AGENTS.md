@@ -171,7 +171,7 @@ git status --short
 - annotated tag `v0.5.1` 指向 `c0b71a0`，发布页为：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.5.1
 - 已发布 v0.5.1 EXE 为 96,926,112 bytes，SHA-256：`126134AF93E31344768B847760B25FFE56F24C966AC36EE5216003D51B661937`。
 - draft→三资产 digest 核验→publish 自动化已随 v0.5.1 完成首次真实 GitHub 端到端发布；三个远端资产均已核对 digest。
-- 新构建会写入 PE FileVersion/ProductVersion；这不等于公共可信的 Authenticode 签名。当前发布（0.7.0）仍使用自签名证书。
+- 新构建会写入 PE FileVersion/ProductVersion；这不等于公共可信的 Authenticode 签名。当前发布（0.7.1）仍使用自签名证书。
 - 自定义正则安全检查已接入保存与解析链路，并在 0.6.0 升级为结构启发式；仍需注意它不能覆盖所有复杂正则。
 - annotated tag `v0.6.0`（tag object `589e35669d47f4b974160cb474def7d22f3b4228`）指向 `29b3dab5960ef9efd55a5123294f19ca17b38e7f`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.6.0
 - 已发布 v0.6.0 EXE 为 96,948,502 bytes，SHA-256：`44E769B707F6DDEB144B5994BF7674AE33FA9E64317243125387F615291A75D2`；远端三资产 digest 已核对。
@@ -198,5 +198,7 @@ git status --short
 - 已发布 v0.6.10 EXE 为 96,995,800 bytes，SHA-256：`76677911B29A597FC452A6DA98E481040BAC42BB55F287E8F7FB694B774153B9`；使用自签名证书，远端三资产 digest 已核对。本版修复快捷访问/面包屑双击自我递归与重复触发、不预览按钮慢速双击双开、标签和占用分析入口双击重复触发，并补充默认快捷访问文档。
 - annotated tag `v0.7.0`（tag object `9d8d20d9b1cd2888f8252f147f4aa340a17e80a5`）指向 `edad0c3b3f6e903040e327d2665e270a530583a5`，发布页：https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.7.0
 - 已发布 v0.7.0 EXE 为 96,998,216 bytes，SHA-256：`CC574C4A007727B67DAC8CFB2B89300721E357F8A083837009BA4D58996A7469`；使用自签名证书，远端三资产 digest 已核对。本版修正默认下载目录、未启用时的 rar/7z 解压、版本目录名逃逸、WinHTTP 代理结构体，并在启动时应用隐藏文件设置。
+- annotated tag `v0.7.1`（tag object `4e681b30ca451ba0f568c6c6a6630652eb24a919`）指向 `bd135c2c5bc908198858761c9c45e43a5b505656`，发布页 https://github.com/FengBujue0104/SeavoExplorer/releases/tag/v0.7.1
+- 已发布 v0.7.1 EXE 为 97,003,136 字节，SHA-256 为 `B4DA31B9AEA5A2A0284F34323260FC42E915194CF9318DA1C3A3BC3281F6195A`。EXE 使用带时间戳的自签名 Authenticode 签名。远端三个资产的大小和摘要均与本地构建一致。
 
 交付时明确报告修改文件、实际执行的检查、构建产物哈希和未执行事项；不要把“语法可解析”表述成“GUI 功能已验证”。
